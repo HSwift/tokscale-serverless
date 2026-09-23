@@ -1,0 +1,19 @@
+[package]
+name = "tokscale-client"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Local tokscale agent: scans token usage, serves the HTTP API, pushes to the cloud worker"
+
+[dependencies]
+tokscale-core = { git = "https://github.com/junhoyeo/tokscale", rev = "d8fd670a46857e5290e71b10245dc522a344fc17" }
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots", "rustls-tls-webpki-roots"] }
+chrono = "0.4"
+uuid = { version = "1", features = ["v4"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

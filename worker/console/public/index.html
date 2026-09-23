@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>tokscale · token 用量</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='1' y='1' width='6.5' height='6.5' rx='1.5' fill='%230d419d'/%3E%3Crect x='8.5' y='1' width='6.5' height='6.5' rx='1.5' fill='%231f6feb'/%3E%3Crect x='1' y='8.5' width='6.5' height='6.5' rx='1.5' fill='%23388bfd'/%3E%3Crect x='8.5' y='8.5' width='6.5' height='6.5' rx='1.5' fill='%2379b8ff'/%3E%3C/svg%3E" />
+<link rel="stylesheet" href="/style.css" />
+<script>
+	try {
+		document.documentElement.dataset.theme =
+			localStorage.getItem("tokscale-theme") === "light" ? "light" : "dark";
+	} catch {
+		document.documentElement.dataset.theme = "dark";
+	}
+</script>
+</head>
+<body>
+<main class="page">
+	<header class="topbar">
+		<div class="brand">
+			<span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+			<span class="brand-name">tokscale</span>
+		</div>
+		<div class="topside">
+			<dl class="stats" id="stats" aria-live="polite"></dl>
+			<button id="theme-toggle" class="icon-btn" type="button" aria-label="切换深浅主题" title="切换深浅主题">
+				<svg class="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+					<circle cx="12" cy="12" r="4.5" />
+					<path d="M12 2v2.5M12 19.5V22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M2 12h2.5M19.5 12H22M4.9 19.1l1.8-1.8M17.3 6.7l1.8-1.8" />
+				</svg>
+				<svg class="i-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+					<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z" />
+				</svg>
+			</button>
+		</div>
+	</header>
+
+	<section class="panel" aria-label="每日 token 用量热力图">
+		<div class="panel-head">
+			<div class="seg" id="range-seg" role="tablist" aria-label="时间范围">
+				<button type="button" data-range="week" role="tab" aria-selected="false">周</button>
+				<button type="button" data-range="month" class="active" role="tab" aria-selected="true">月</button>
+				<button type="button" data-range="year" role="tab" aria-selected="false">年</button>
+			</div>
+			<div class="seg" id="group-seg" role="tablist" aria-label="统计维度">
+				<button type="button" data-group="devices" class="active" role="tab" aria-selected="true">设备</button>
+				<button type="button" data-group="models" role="tab" aria-selected="false">模型</button>
+			</div>
+			<div class="chips" id="chips" role="listbox" aria-label="选择设备或模型"></div>
+		</div>
+
+		<div class="heatmap" id="heatmap">
+			<div class="months" id="months" aria-hidden="true"></div>
+			<div class="heatmap-row">
+				<div class="dow" aria-hidden="true">
+					<span style="grid-row:2">一</span>
+					<span style="grid-row:4">三</span>
+					<span style="grid-row:6">五</span>
+				</div>
+				<div class="grid-scroll">
+					<div class="grid" id="grid" role="group" aria-label="每日 token 用量"></div>
+				</div>
+			</div>
+			<div class="iso-scroll hidden" id="iso-scroll">
+				<svg id="iso" role="group" aria-label="每日 token 用量等距视图"></svg>
+			</div>
+			<div class="heatmap-empty hidden" id="heatmap-empty">这个范围内还没有数据。</div>
+		</div>
+
+		<div class="panel-foot">
+			<span class="range-note" id="range-note"></span>
+			<div class="foot-right">
+				<span class="legend" aria-label="用量强度由低到高">低
+					<i class="l0"></i><i class="l1"></i><i class="l2"></i><i class="l3"></i><i class="l4"></i>
+				高</span>
+				<div class="seg small" id="view-seg" aria-label="视图切换">
+					<button type="button" data-view="2d" class="active">2D</button>
+					<button type="button" data-view="3d">3D</button>
+				</div>
+			</div>
+		</div>
+	</section>
+
+	<section class="bars" aria-label="用量构成">
+		<div class="bar-panel" id="bar-clients">
+			<h2>按 agent <span class="bar-total"></span></h2>
+			<div class="share-bar" role="img"></div>
+			<ul class="bar-legend"></ul>
+		</div>
+		<div class="bar-panel" id="bar-models">
+			<h2>按模型 <span class="bar-total"></span></h2>
+			<div class="share-bar" role="img"></div>
+			<ul class="bar-legend"></ul>
+		</div>
+		<div class="bar-panel" id="bar-devices">
+			<h2>按设备 <span class="bar-total"></span></h2>
+			<div class="share-bar" role="img"></div>
+			<ul class="bar-legend"></ul>
+		</div>
+	</section>
+
+	<footer class="page-foot" id="page-foot"></footer>
+</main>
+
+<div class="tooltip hidden" id="tooltip" role="tooltip"></div>
+<div class="overlay" id="overlay">
+	<p id="overlay-text">加载中…</p>
+</div>
+
+<script type="module" src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,41 @@
+/**
+ * For more details on how to configure Wrangler, refer to:
+ * https://developers.cloudflare.com/workers/wrangler/configuration/
+ */
+{
+	"$schema": "../node_modules/wrangler/config-schema.json",
+	"name": "tokscale-serverless-api",
+	"main": "./src/index.ts",
+	"compatibility_date": "2026-09-16",
+	// Keep workers.dev enabled as a fallback ingest endpoint alongside the
+	// custom domain.
+	"workers_dev": true,
+	"observability": {
+		"enabled": true
+	},
+	"upload_source_maps": true,
+	// API custom domain (token-only access; browser/Access traffic is a
+	// separate future console concern).
+	"routes": [
+		{ "pattern": "usage-api.example.com", "custom_domain": true }
+	],
+	// Access JWT verification (console frontend authenticates via Cloudflare
+	// Access; the API re-verifies the assertion cryptographically). Identifiers,
+	// not secrets. Until real values replace the placeholders, Access auth is
+	// inert and only the bearer token works.
+	"vars": {
+		"ACCESS_TEAM_DOMAIN": "https://replace-with-team.cloudflareaccess.com",
+		"ACCESS_AUD": "replace-with-access-application-aud"
+	},
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "tokscale-serverless",
+			"database_id": "YOUR_D1_DATABASE_ID",
+			"migrations_dir": "migrations"
+		}
+	]
+	// Secrets: INGEST_TOKEN (shared bearer token for machines) — set with
+	// `npx wrangler secret put INGEST_TOKEN --config api/wrangler.jsonc`;
+	// locally via api/.dev.vars.
+}

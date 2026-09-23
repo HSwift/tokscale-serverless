@@ -1,0 +1,26 @@
+{
+  "name": "tokscale-serverless",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "deploy": "wrangler deploy --config api/wrangler.jsonc",
+    "dev": "wrangler dev --config api/wrangler.jsonc",
+    "start": "wrangler dev --config api/wrangler.jsonc",
+    "test": "vitest",
+    "cf-typegen": "wrangler types --config api/wrangler.jsonc"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "^1.0.0",
+    "@types/node": "^26.6.2",
+    "typescript": "^5.5.2",
+    "vitest": "~4.1.0",
+    "wrangler": "^4.135.0"
+  },
+  "allowScripts": {
+    "esbuild@0.28.1": true,
+    "workerd@1.20260918.1": true
+  },
+  "dependencies": {
+    "jose": "^6.2.12"
+  }
+}

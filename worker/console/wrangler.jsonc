@@ -1,0 +1,34 @@
+/**
+ * For more details on how to configure Wrangler, refer to:
+ * https://developers.cloudflare.com/workers/wrangler/configuration/
+ */
+{
+	"$schema": "../node_modules/wrangler/config-schema.json",
+	"name": "tokscale-serverless-console",
+	"main": "./src/worker.ts",
+	"compatibility_date": "2026-09-16",
+	"workers_dev": true,
+	"observability": {
+		"enabled": true
+	},
+	"assets": {
+		"directory": "./public",
+		"binding": "ASSETS"
+	},
+	// Static assets win by default; /api/* always reaches the worker first so
+	// it can be proxied to the api worker (and credential-injected).
+	"run_worker_first": ["/api", "/api/*"],
+	"services": [
+		{
+			"binding": "API",
+			"service": "tokscale-serverless-api"
+		}
+	],
+	"routes": [
+		{ "pattern": "usage.example.com", "custom_domain": true }
+	]
+	// Secrets: INGEST_TOKEN (same shared token as the api worker) — set with
+	// `npx wrangler secret put INGEST_TOKEN --config console/wrangler.jsonc`.
+	// Used only to authorize server-side read proxies until Access fronts this
+	// worker.
+}

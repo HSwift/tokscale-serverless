@@ -1,0 +1,452 @@
+/**
+ * tokscale-serverless-api: cloud aggregation point for tokscale-client agents.
+ *
+ * Local clients push their /api/export payload (TsExport shape) to
+ * POST /api/ingest with a shared bearer token; rows upsert idempotently per
+ * (device, date, client, model), so any device may resend full history at any
+ * time. Read endpoints accept the bearer token (scripts) or a verified
+ * Cloudflare Access JWT (browser console, verified against the team JWKS).
+ * Qoder plan credits travel day-level and stay out of USD cost columns.
+ */
+
+import {
+	authenticateAccess,
+	authenticateBearer,
+	type AuthActor,
+	type Env,
+} from "./auth";
+
+interface TsTokenBreakdown {
+	input?: number;
+	output?: number;
+	cacheRead?: number;
+	cacheWrite?: number;
+	reasoning?: number;
+}
+
+interface TsSourceContribution {
+	client?: string;
+	modelId?: string;
+	providerId?: string;
+	tokens?: TsTokenBreakdown;
+	cost?: number;
+	messages?: number;
+}
+
+interface TsDailyTotals {
+	tokens?: number;
+	cost?: number;
+	messages?: number;
+	costIsComplete?: boolean;
+	credits?: number;
+}
+
+interface TsDailyContribution {
+	date?: string;
+	totals?: TsDailyTotals;
+	clients?: TsSourceContribution[];
+}
+
+interface TsDevice {
+	id?: string;
+	name?: string;
+	hostname?: string;
+	os?: string;
+	arch?: string;
+}
+
+interface TsExport {
+	device?: TsDevice;
+	contributions?: TsDailyContribution[];
+}
+
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+function isValidDate(s: string): boolean {
+	if (!DATE_RE.test(s)) return false;
+	const [y, m, d] = s.split("-").map(Number);
+	if (m < 1 || m > 12 || d < 1) return false;
+	return d <= new Date(Date.UTC(y, m, 0)).getUTCDate();
+}
+
+function json(body: unknown, status = 200): Response {
+	return new Response(JSON.stringify(body), {
+		status,
+		headers: { "content-type": "application/json" },
+	});
+}
+
+function error(status: number, code: string, message: string): Response {
+	return json({ error: { code, message } }, status);
+}
+
+async function requireBearer(request: Request, env: Env): Promise<Response | null> {
+	if (!env.INGEST_TOKEN) {
+		return error(503, "auth_not_configured", "INGEST_TOKEN secret is not set");
+	}
+	if (!(await authenticateBearer(request, env))) {
+		return error(401, "unauthorized", "missing or invalid bearer token");
+	}
+	return null;
+}
+
+/**
+ * Read endpoints: verified Access JWT (console browser) or bearer (scripts).
+ * Returns the actor on success so handlers can surface it (/api/me).
+ */
+async function authenticateRead(
+	request: Request,
+	env: Env,
+): Promise<{ actor: AuthActor } | { failure: Response }> {
+	const [accessActor, bearerActor] = await Promise.all([
+		authenticateAccess(request, env),
+		authenticateBearer(request, env),
+	]);
+	const actor = accessActor ?? bearerActor;
+	if (!actor) {
+		if (!env.INGEST_TOKEN) {
+			return { failure: error(503, "auth_not_configured", "INGEST_TOKEN secret is not set") };
+		}
+		return {
+			failure: error(
+				401,
+				"unauthorized",
+				"a valid Cloudflare Access assertion or bearer token is required",
+			),
+		};
+	}
+	return { actor };
+}
+
+function num(value: unknown): number {
+	const n = Number(value);
+	return Number.isFinite(n) ? n : 0;
+}
+
+async function ingest(request: Request, env: Env): Promise<Response> {
+	let body: TsExport;
+	try {
+		body = (await request.json()) as TsExport;
+	} catch {
+		return error(400, "bad_request", "body must be JSON");
+	}
+	const device = body.device ?? {};
+	if (!device.id || typeof device.id !== "string") {
+		return error(400, "bad_request", "device.id is required");
+	}
+	if (!Array.isArray(body.contributions)) {
+		return error(400, "bad_request", "contributions must be an array");
+	}
+
+	const stmts: D1PreparedStatement[] = [
+		env.DB.prepare(
+			`INSERT INTO devices (id, name, hostname, os, arch, last_seen)
+			 VALUES (?, ?, ?, ?, ?, datetime('now'))
+			 ON CONFLICT(id) DO UPDATE SET
+			   name = excluded.name,
+			   hostname = excluded.hostname,
+			   os = excluded.os,
+			   arch = excluded.arch,
+			   last_seen = datetime('now')`,
+		).bind(
+			device.id,
+			device.name ?? null,
+			device.hostname ?? null,
+			device.os ?? null,
+			device.arch ?? null,
+		),
+	];
+
+	let days = 0;
+	let rows = 0;
+	for (const day of body.contributions) {
+		const date = day.date ?? "";
+		if (!isValidDate(date)) {
+			return error(400, "bad_request", `invalid contribution date '${date}'`);
+		}
+		days += 1;
+		const costIsComplete = day.totals?.costIsComplete;
+		for (const row of day.clients ?? []) {
+			if (!row.client || !row.modelId) continue;
+			rows += 1;
+			stmts.push(
+				env.DB.prepare(
+					`INSERT INTO daily_rows
+					   (device_id, date, client, model_id, provider_id,
+					    input, output, cache_read, cache_write, reasoning,
+					    cost, messages, cost_is_complete, updated_at)
+					 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+					 ON CONFLICT(device_id, date, client, model_id) DO UPDATE SET
+					   provider_id = excluded.provider_id,
+					   input = excluded.input,
+					   output = excluded.output,
+					   cache_read = excluded.cache_read,
+					   cache_write = excluded.cache_write,
+					   reasoning = excluded.reasoning,
+					   cost = excluded.cost,
+					   messages = excluded.messages,
+					   cost_is_complete = excluded.cost_is_complete,
+					   updated_at = datetime('now')`,
+				).bind(
+					device.id,
+					date,
+					row.client,
+					row.modelId,
+					row.providerId ?? null,
+					num(row.tokens?.input),
+					num(row.tokens?.output),
+					num(row.tokens?.cacheRead),
+					num(row.tokens?.cacheWrite),
+					num(row.tokens?.reasoning),
+					num(row.cost),
+					num(row.messages),
+					costIsComplete === undefined ? null : costIsComplete ? 1 : 0,
+				),
+			);
+		}
+		if (day.totals?.credits !== undefined) {
+			stmts.push(
+				env.DB.prepare(
+					`INSERT INTO daily_credits (device_id, date, credits, updated_at)
+					 VALUES (?, ?, ?, datetime('now'))
+					 ON CONFLICT(device_id, date) DO UPDATE SET
+					   credits = excluded.credits,
+					   updated_at = datetime('now')`,
+				).bind(device.id, date, num(day.totals.credits)),
+			);
+		}
+	}
+
+	// D1 batches cap at ~10k bound parameters; a full-history resend stays
+	// far below that, but chunk defensively.
+	for (let i = 0; i < stmts.length; i += 100) {
+		await env.DB.batch(stmts.slice(i, i + 100));
+	}
+	return json({ ok: true, days, rows });
+}
+
+interface Filters {
+	where: string;
+	binds: string[];
+}
+
+function filters(url: URL): Filters | Response {
+	const clauses: string[] = [];
+	const binds: string[] = [];
+	for (const [key, column] of [
+		["since", "date"],
+		["until", "date"],
+	] as const) {
+		const value = url.searchParams.get(key);
+		if (value !== null) {
+			if (!isValidDate(value)) {
+				return error(400, "bad_request", `invalid ${key} date (expected YYYY-MM-DD)`);
+			}
+			clauses.push(`${column} ${key === "since" ? ">=" : "<="} ?`);
+			binds.push(value);
+		}
+	}
+	const deviceId = url.searchParams.get("deviceId");
+	if (deviceId) {
+		clauses.push("device_id = ?");
+		binds.push(deviceId);
+	}
+	return {
+		where: clauses.length ? `WHERE ${clauses.join(" AND ")}` : "",
+		binds,
+	};
+}
+
+async function summary(url: URL, env: Env): Promise<Response> {
+	const f = filters(url);
+	if (f instanceof Response) return f;
+	const totals = await env.DB.prepare(
+		`SELECT COALESCE(SUM(input), 0) AS input,
+		        COALESCE(SUM(output), 0) AS output,
+		        COALESCE(SUM(cache_read), 0) AS cacheRead,
+		        COALESCE(SUM(cache_write), 0) AS cacheWrite,
+		        COALESCE(SUM(reasoning), 0) AS reasoning,
+		        COALESCE(SUM(cost), 0) AS cost,
+		        COALESCE(SUM(messages), 0) AS messages,
+		        COUNT(DISTINCT date) AS days,
+		        COUNT(DISTINCT device_id) AS devices
+		 FROM daily_rows ${f.where}`,
+	)
+		.bind(...f.binds)
+		.first();
+	const credits = await env.DB.prepare(
+		`SELECT COALESCE(SUM(credits), 0) AS credits FROM daily_credits ${f.where}`,
+	)
+		.bind(...f.binds)
+		.first();
+	const byClient = await env.DB.prepare(
+		`SELECT client,
+		        SUM(input + output + cache_read + cache_write + reasoning) AS tokens,
+		        SUM(cost) AS cost,
+		        SUM(messages) AS messages
+		 FROM daily_rows ${f.where}
+		 GROUP BY client ORDER BY tokens DESC`,
+	)
+		.bind(...f.binds)
+		.all();
+	return json({ summary: totals, credits: credits?.credits ?? 0, clients: byClient.results });
+}
+
+async function daily(url: URL, env: Env): Promise<Response> {
+	const f = filters(url);
+	if (f instanceof Response) return f;
+	const days = await env.DB.prepare(
+		`SELECT date,
+		        SUM(input) AS input,
+		        SUM(output) AS output,
+		        SUM(cache_read) AS cacheRead,
+		        SUM(cache_write) AS cacheWrite,
+		        SUM(reasoning) AS reasoning,
+		        SUM(cost) AS cost,
+		        SUM(messages) AS messages
+		 FROM daily_rows ${f.where}
+		 GROUP BY date ORDER BY date`,
+	)
+		.bind(...f.binds)
+		.all();
+	const credits = await env.DB.prepare(
+		`SELECT date, SUM(credits) AS credits FROM daily_credits ${f.where} GROUP BY date`,
+	)
+		.bind(...f.binds)
+		.all();
+	const creditsByDate = new Map(
+		(credits.results as unknown as { date: string; credits: number }[]).map((r) => [
+			r.date,
+			r.credits,
+		]),
+	);
+	const contributions = (days.results as unknown as Record<string, unknown>[]).map((r) => ({
+		...r,
+		credits: creditsByDate.get(r.date as string) ?? 0,
+	}));
+	return json({ contributions });
+}
+
+async function models(url: URL, env: Env): Promise<Response> {
+	const f = filters(url);
+	if (f instanceof Response) return f;
+	const rows = await env.DB.prepare(
+		`SELECT model_id AS modelId,
+		        client,
+		        SUM(input) AS input,
+		        SUM(output) AS output,
+		        SUM(cache_read) AS cacheRead,
+		        SUM(cache_write) AS cacheWrite,
+		        SUM(reasoning) AS reasoning,
+		        SUM(input + output + cache_read + cache_write + reasoning) AS tokens,
+		        SUM(cost) AS cost,
+		        SUM(messages) AS messages
+		 FROM daily_rows ${f.where}
+		 GROUP BY model_id, client ORDER BY tokens DESC`,
+	)
+		.bind(...f.binds)
+		.all();
+	return json({ models: rows.results });
+}
+
+async function devices(env: Env): Promise<Response> {
+	const result = await env.DB.prepare(
+		`SELECT d.id, d.name, d.hostname, d.os, d.arch, d.first_seen, d.last_seen,
+		        COUNT(r.date) AS rows,
+		        MAX(r.date) AS lastDate
+		 FROM devices d LEFT JOIN daily_rows r ON r.device_id = d.id
+		 GROUP BY d.id ORDER BY d.last_seen DESC`,
+	).all();
+	return json({ devices: result.results });
+}
+
+interface SeriesEntity {
+	key: string;
+	label: string;
+	tokens: number;
+	days: { date: string; tokens: number }[];
+}
+
+// Per-day token series per device or per model — feeds the console heatmap's
+// entity switcher without shipping raw rows to the browser.
+async function series(url: URL, env: Env): Promise<Response> {
+	const f = filters(url);
+	if (f instanceof Response) return f;
+	const group = url.searchParams.get("group") ?? "devices";
+	if (group !== "devices" && group !== "models" && group !== "clients") {
+		return error(400, "bad_request", "group must be 'devices', 'models' or 'clients'");
+	}
+	const select =
+		group === "devices"
+			? `daily_rows.device_id AS key,
+			   COALESCE(devices.name, devices.hostname, daily_rows.device_id) AS label`
+			: group === "clients"
+				? "client AS key, client AS label"
+				: "model_id AS key, model_id AS label";
+	const join =
+		group === "devices"
+			? "LEFT JOIN devices ON devices.id = daily_rows.device_id"
+			: "";
+	const rows = await env.DB.prepare(
+		`SELECT ${select}, date,
+		        SUM(input + output + cache_read + cache_write + reasoning) AS tokens
+		 FROM daily_rows ${join} ${f.where}
+		 GROUP BY key, date ORDER BY date`,
+	)
+		.bind(...f.binds)
+		.all();
+	const entities = new Map<string, SeriesEntity>();
+	for (const row of rows.results as unknown as Record<string, unknown>[]) {
+		const key = String(row.key);
+		let entity = entities.get(key);
+		if (!entity) {
+			entity = { key, label: String(row.label ?? key), tokens: 0, days: [] };
+			entities.set(key, entity);
+		}
+		const tokens = num(row.tokens);
+		entity.tokens += tokens;
+		entity.days.push({ date: String(row.date), tokens });
+	}
+	return json({
+		group,
+		entities: [...entities.values()].sort((a, b) => b.tokens - a.tokens),
+	});
+}
+
+export default {
+	async fetch(request, env): Promise<Response> {
+		const url = new URL(request.url);
+		if (url.pathname === "/health") {
+			return json({ status: "ok" });
+		}
+		if (!url.pathname.startsWith("/api/")) {
+			return error(404, "not_found", "unknown route");
+		}
+		if (url.pathname === "/api/ingest" && request.method === "POST") {
+			const authFailure = await requireBearer(request, env);
+			if (authFailure) return authFailure;
+			return ingest(request, env);
+		}
+		const auth = await authenticateRead(request, env);
+		if ("failure" in auth) return auth.failure;
+		if (request.method !== "GET") {
+			return error(405, "method_not_allowed", "unsupported method");
+		}
+		switch (url.pathname) {
+			case "/api/me":
+				return json({ actor: auth.actor });
+			case "/api/summary":
+				return summary(url, env);
+			case "/api/daily":
+				return daily(url, env);
+			case "/api/models":
+				return models(url, env);
+			case "/api/series":
+				return series(url, env);
+			case "/api/devices":
+				return devices(env);
+			default:
+				return error(404, "not_found", "unknown route");
+		}
+	},
+} satisfies ExportedHandler<Env>;
