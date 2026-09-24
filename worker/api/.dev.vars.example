@@ -1,0 +1,2 @@
+# Local development only. Use the same value in console/.dev.vars.
+INGEST_TOKEN="local-development-only-change-me"

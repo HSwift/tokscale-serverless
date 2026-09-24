@@ -28,6 +28,15 @@ struct StoredDevice {
     created_at: String,
 }
 
+pub(crate) fn new_identity_document() -> serde_json::Value {
+    serde_json::to_value(StoredDevice {
+        id: format!("dev_{}", uuid::Uuid::new_v4().simple()),
+        name: None,
+        created_at: chrono::Utc::now().to_rfc3339(),
+    })
+    .expect("device identity is serializable")
+}
+
 pub fn resolve() -> DeviceInfo {
     let (id, name) = resolve_id_name();
     DeviceInfo {
@@ -74,9 +83,9 @@ fn hostname() -> String {
     env_opt("HOSTNAME")
         .or_else(|| env_opt("COMPUTERNAME"))
         .or_else(|| {
-            std::fs::read_to_string("/proc/sys/kernel/hostname")
+            hostname::get()
                 .ok()
-                .map(|s| s.trim().to_string())
+                .map(|name| name.to_string_lossy().trim().to_string())
                 .filter(|s| !s.is_empty())
         })
         .unwrap_or_else(|| "unknown".to_string())

@@ -44,15 +44,24 @@ pub struct QoderScan {
     pub credits: Vec<QoderCredit>,
 }
 
-pub fn scan(home: &Path, coeffs: &CoeffTable) -> QoderScan {
+pub fn scan(home: &Path, use_env_roots: bool, coeffs: &CoeffTable) -> QoderScan {
     let mut out = QoderScan::default();
     let mut seen: HashSet<String> = HashSet::new();
-    for db in db_candidates(home) {
+    let env = |name: &str| {
+        if use_env_roots {
+            std::env::var_os(name)
+                .filter(|p| !p.is_empty())
+                .map(PathBuf::from)
+        } else {
+            None
+        }
+    };
+    for db in db_candidates(home, env) {
         if db.is_file() {
             parse_db(&db, &mut seen, &mut out);
         }
     }
-    for dir in projects_candidates(home) {
+    for dir in projects_candidates(home, env) {
         if dir.is_dir() {
             parse_projects(&dir, &mut seen, &mut out, coeffs);
         }
@@ -60,18 +69,18 @@ pub fn scan(home: &Path, coeffs: &CoeffTable) -> QoderScan {
     out
 }
 
-fn db_candidates(home: &Path) -> Vec<PathBuf> {
+fn db_candidates(home: &Path, env: impl Fn(&str) -> Option<PathBuf>) -> Vec<PathBuf> {
     let mut v = Vec::new();
-    if let Some(p) = env_opt("QODER_DB_PATH") {
-        v.push(PathBuf::from(p));
+    if let Some(p) = env("QODER_DB_PATH") {
+        v.push(p);
     }
-    if let Some(p) = env_opt("QODER_CN_DB_PATH") {
-        v.push(PathBuf::from(p));
+    if let Some(p) = env("QODER_CN_DB_PATH") {
+        v.push(p);
     }
     // TokenTracker semantics: QODER_HOME points at the app-support root.
     for (home_key, app) in [("QODER_HOME", "Qoder"), ("QODER_CN_HOME", "QoderCN")] {
-        if let Some(root) = env_opt(home_key) {
-            v.push(shared_client_cache_db(Path::new(&root)));
+        if let Some(root) = env(home_key) {
+            v.push(shared_client_cache_db(&root));
         }
         v.push(
             home.join("Library")
@@ -82,8 +91,17 @@ fn db_candidates(home: &Path) -> Vec<PathBuf> {
                 .join("db")
                 .join("local.db"),
         );
-        if let Some(appdata) = env_opt("APPDATA") {
-            v.push(shared_client_cache_db(Path::new(&appdata).join(app).as_path()));
+        let appdata = env("APPDATA").unwrap_or_else(|| home.join("AppData").join("Roaming"));
+        v.push(shared_client_cache_db(&appdata.join(app)));
+        if let Some(xdg) = env("XDG_CONFIG_HOME").filter(|path| path.is_absolute()) {
+            v.push(shared_client_cache_db(&xdg.join(app)));
+            v.push(
+                xdg.join(app)
+                    .join("qodercli")
+                    .join("cache")
+                    .join("db")
+                    .join("local.db"),
+            );
         }
         v.push(shared_client_cache_db(&home.join(".config").join(app)));
     }
@@ -107,13 +125,13 @@ fn shared_client_cache_db(app_root: &Path) -> PathBuf {
         .join("local.db")
 }
 
-fn projects_candidates(home: &Path) -> Vec<PathBuf> {
+fn projects_candidates(home: &Path, env: impl Fn(&str) -> Option<PathBuf>) -> Vec<PathBuf> {
     let mut v = Vec::new();
-    if let Some(p) = env_opt("QODER_PROJECTS_DIR") {
-        v.push(PathBuf::from(p));
+    if let Some(p) = env("QODER_PROJECTS_DIR") {
+        v.push(p);
     }
-    if let Some(p) = env_opt("QODER_CN_PROJECTS_DIR") {
-        v.push(PathBuf::from(p));
+    if let Some(p) = env("QODER_CN_PROJECTS_DIR") {
+        v.push(p);
     }
     v.push(home.join(".qoder").join("projects"));
     v.push(home.join(".qoder-cn").join("projects"));
@@ -123,13 +141,6 @@ fn projects_candidates(home: &Path) -> Vec<PathBuf> {
             .join("projects"),
     );
     v
-}
-
-fn env_opt(name: &str) -> Option<String> {
-    std::env::var(name)
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
 }
 
 fn local_date(secs: i64) -> String {
@@ -234,7 +245,14 @@ fn parse_db(path: &Path, seen: &mut HashSet<String>, out: &mut QoderScan) {
         if tokens.total() == 0 {
             continue;
         }
-        let dedup = format!("db:{}", if id.is_empty() { format!("{gmt_create_ms}") } else { id.clone() });
+        let dedup = format!(
+            "db:{}",
+            if id.is_empty() {
+                format!("{gmt_create_ms}")
+            } else {
+                id.clone()
+            }
+        );
         if !seen.insert(dedup.clone()) {
             continue;
         }
@@ -255,7 +273,10 @@ fn parse_db(path: &Path, seen: &mut HashSet<String>, out: &mut QoderScan) {
 fn normalize_token_info(token_info: &str) -> Option<TokenBreakdown> {
     let v: serde_json::Value = serde_json::from_str(token_info).ok()?;
     let prompt = v.get("prompt_tokens")?.as_f64()?;
-    let cached = v.get("cached_tokens").and_then(|x| x.as_f64()).unwrap_or(0.0);
+    let cached = v
+        .get("cached_tokens")
+        .and_then(|x| x.as_f64())
+        .unwrap_or(0.0);
     let completion = v.get("completion_tokens")?.as_f64()?;
     if prompt < 0.0 || cached < 0.0 || completion < 0.0 {
         return None;
@@ -294,7 +315,12 @@ fn model_from_db(model_info: Option<&str>, record_extra: Option<&str>) -> String
 
 // ---------- Transcript JSONL (credits only; token fields are zeroed) ----------
 
-fn parse_projects(dir: &Path, seen: &mut HashSet<String>, out: &mut QoderScan, coeffs: &CoeffTable) {
+fn parse_projects(
+    dir: &Path,
+    seen: &mut HashSet<String>,
+    out: &mut QoderScan,
+    coeffs: &CoeffTable,
+) {
     let mut files = Vec::new();
     collect_jsonl(dir, &mut files);
     files.sort();
@@ -339,10 +365,7 @@ fn parse_transcript(
         }
         let message = rec.get("message").cloned().unwrap_or_default();
         let usage = message.get("usage").cloned().unwrap_or_default();
-        let credits = usage
-            .get("credits")
-            .and_then(|c| c.as_f64())
-            .unwrap_or(0.0);
+        let credits = usage.get("credits").and_then(|c| c.as_f64()).unwrap_or(0.0);
         // Transcripts use the same OpenAI-style semantics as the SQLite
         // token_info: input_tokens includes cache_read_input_tokens. Split
         // cached input out so TokenBreakdown::total() does not double-count.
@@ -398,10 +421,7 @@ fn parse_transcript(
         let mut msg = blank_message(QODER_CLIENT);
         msg.model_id = model.clone();
         msg.session_id = session_id.clone();
-        msg.workspace_key = rec
-            .get("cwd")
-            .and_then(|c| c.as_str())
-            .map(str::to_string);
+        msg.workspace_key = rec.get("cwd").and_then(|c| c.as_str()).map(str::to_string);
         msg.timestamp = secs;
         msg.date = date.clone();
         msg.tokens = tokens;
@@ -429,6 +449,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn discovers_desktop_database_layouts_for_all_platforms() {
+        let home = std::env::temp_dir().join("用户 home");
+        let candidates = db_candidates(&home, |_| None);
+        for root in [
+            home.join("Library").join("Application Support"),
+            home.join("AppData").join("Roaming"),
+            home.join(".config"),
+        ] {
+            for app in ["Qoder", "QoderCN"] {
+                assert!(candidates.contains(&shared_client_cache_db(&root.join(app))));
+            }
+        }
+        assert!(candidates.contains(&home.join(".config/Qoder/qodercli/cache/db/local.db")));
+    }
+
+    #[test]
+    fn respects_relocated_config_and_explicit_qoder_paths() {
+        let root = std::env::temp_dir().join("用户 paths");
+        let env = |name: &str| match name {
+            "APPDATA" => Some(root.join("Roaming data")),
+            "XDG_CONFIG_HOME" => Some(root.join("xdg config")),
+            "QODER_HOME" => Some(root.join("custom Qoder")),
+            "QODER_DB_PATH" => Some(root.join("custom.db")),
+            "QODER_PROJECTS_DIR" => Some(root.join("custom projects")),
+            _ => None,
+        };
+        let candidates = db_candidates(&root, env);
+        for app_root in [
+            root.join("Roaming data/Qoder"),
+            root.join("xdg config/Qoder"),
+            root.join("custom Qoder"),
+        ] {
+            assert!(candidates.contains(&shared_client_cache_db(&app_root)));
+        }
+        assert_eq!(candidates[0], root.join("custom.db"));
+        assert_eq!(
+            projects_candidates(&root, env)[0],
+            root.join("custom projects")
+        );
+    }
+
+    #[test]
     fn token_info_separates_cached_without_double_counting() {
         let t = normalize_token_info(
             r#"{"prompt_tokens":58299,"cached_tokens":57853,"completion_tokens":2812}"#,
@@ -444,9 +506,7 @@ mod tests {
     fn token_info_rejects_garbage() {
         assert!(normalize_token_info("not json").is_none());
         assert!(normalize_token_info(r#"{"prompt_tokens":1}"#).is_none());
-        assert!(
-            normalize_token_info(r#"{"prompt_tokens":-1,"completion_tokens":2}"#).is_none()
-        );
+        assert!(normalize_token_info(r#"{"prompt_tokens":-1,"completion_tokens":2}"#).is_none());
     }
 
     #[test]
@@ -494,7 +554,11 @@ mod tests {
         let mut seen = HashSet::new();
         let coeffs = CoeffTable::load();
         parse_projects(&dir, &mut seen, &mut out, &coeffs);
-        assert_eq!(out.messages.len(), 2, "zero-credit and duplicate rows skipped");
+        assert_eq!(
+            out.messages.len(),
+            2,
+            "zero-credit and duplicate rows skipped"
+        );
         assert_eq!(out.credits.len(), 2);
         let total: f64 = out.credits.iter().map(|c| c.credits).sum();
         assert!((total - 3.5).abs() < 1e-9);
@@ -536,11 +600,7 @@ mod tests {
                 }
             }
         });
-        std::fs::write(
-            dir.join("s.jsonl"),
-            serde_json::to_string(&record).unwrap(),
-        )
-        .unwrap();
+        std::fs::write(dir.join("s.jsonl"), serde_json::to_string(&record).unwrap()).unwrap();
         let mut out = QoderScan::default();
         let mut seen = HashSet::new();
         let coeffs = CoeffTable::load();

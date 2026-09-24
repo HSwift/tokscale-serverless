@@ -36,8 +36,8 @@ const DEFAULT_JSON: &str = include_str!("../qoder-coeffs.json");
 
 impl CoeffTable {
     pub fn load() -> Self {
-        let mut map: HashMap<String, ModelCoeff> =
-            serde_json::from_str(DEFAULT_JSON).unwrap_or_else(|e| {
+        let mut map: HashMap<String, ModelCoeff> = serde_json::from_str(DEFAULT_JSON)
+            .unwrap_or_else(|e| {
                 tracing::warn!("embedded qoder-coeffs.json invalid: {e}");
                 HashMap::new()
             });
@@ -75,11 +75,10 @@ impl CoeffTable {
 }
 
 fn override_path() -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("TOKSCALE_QODER_COEFFS") {
+    if let Some(p) = std::env::var_os("TOKSCALE_QODER_COEFFS").filter(|p| !p.is_empty()) {
         return Some(PathBuf::from(p));
     }
-    let p = PathBuf::from(std::env::var_os("TOKSCALE_CONFIG_DIR")?)
-        .join("qoder-coeffs.json");
+    let p = tokscale_core::paths::get_config_dir().join("qoder-coeffs.json");
     p.is_file().then_some(p)
 }
 

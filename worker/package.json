@@ -5,7 +5,10 @@
   "scripts": {
     "deploy": "wrangler deploy --config api/wrangler.jsonc",
     "dev": "wrangler dev --config api/wrangler.jsonc",
+    "dev:console": "wrangler dev --config console/wrangler.jsonc --ip 127.0.0.1 --port 8789 --inspector-port 9230",
     "start": "wrangler dev --config api/wrangler.jsonc",
+    "db:migrate": "wrangler d1 migrations apply DB --local --config api/wrangler.jsonc",
+    "typecheck": "tsc --noEmit",
     "test": "vitest",
     "cf-typegen": "wrangler types --config api/wrangler.jsonc"
   },

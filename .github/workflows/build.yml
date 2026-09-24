@@ -26,21 +26,6 @@ env:
   BIN: tokscale-client
 
 jobs:
-  test:
-    name: cargo test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@master # reads rust-toolchain.toml (1.98)
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: test
-
-      - name: Run tests
-        run: cargo test --workspace --locked
-
   build:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
@@ -49,16 +34,16 @@ jobs:
       matrix:
         include:
           - name: linux-x86_64
-            os: ubuntu-latest
+            os: ubuntu-24.04
             target: x86_64-unknown-linux-musl
           - name: windows-x86_64
-            os: windows-latest
+            os: windows-2022
             target: x86_64-pc-windows-msvc
           - name: macos-aarch64
-            os: macos-latest
+            os: macos-15
             target: aarch64-apple-darwin
           - name: macos-x86_64
-            os: macos-13
+            os: macos-15-intel
             target: x86_64-apple-darwin
     steps:
       - uses: actions/checkout@v4
@@ -68,8 +53,9 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y musl-tools musl-dev
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master # reads rust-toolchain.toml (1.98)
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.98" # Keep in sync with rust-toolchain.toml.
           targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
@@ -84,6 +70,15 @@ jobs:
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: echo "CC_x86_64_unknown_linux_musl=musl-gcc" >> "$GITHUB_ENV"
 
+      - name: macOS minimum version
+        if: runner.os == 'macOS'
+        run: echo "MACOSX_DEPLOYMENT_TARGET=11.0" >> "$GITHUB_ENV"
+
+      # Exercise configuration persistence and CLI startup on the native OS
+      # and architecture before publishing that platform's executable.
+      - name: Run tests on release target
+        run: cargo test --release --workspace --locked --target ${{ matrix.target }}
+
       - name: Build
         run: cargo build --release --locked -p tokscale-client --target ${{ matrix.target }}
 
@@ -91,7 +86,7 @@ jobs:
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: |
           file "target/${{ matrix.target }}/release/$BIN"
-          file "target/${{ matrix.target }}/release/$BIN" | grep -q "statically linked"
+          file "target/${{ matrix.target }}/release/$BIN" | grep -Eq '(statically linked|static-pie linked)'
 
       - name: Package (Unix)
         if: runner.os != 'Windows'
@@ -109,6 +104,7 @@ jobs:
         with:
           name: ${{ env.BIN }}-${{ matrix.target }}
           path: "${{ env.BIN }}-${{ matrix.target }}.*"
+          if-no-files-found: error
           retention-days: 14
 
   release:

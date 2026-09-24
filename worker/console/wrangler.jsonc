@@ -13,11 +13,11 @@
 	},
 	"assets": {
 		"directory": "./public",
-		"binding": "ASSETS"
+		"binding": "ASSETS",
+		// Static assets win by default; /api/* reaches the worker first so it
+		// can be proxied to the api worker (and credential-injected).
+		"run_worker_first": ["/api", "/api/*"]
 	},
-	// Static assets win by default; /api/* always reaches the worker first so
-	// it can be proxied to the api worker (and credential-injected).
-	"run_worker_first": ["/api", "/api/*"],
 	"services": [
 		{
 			"binding": "API",

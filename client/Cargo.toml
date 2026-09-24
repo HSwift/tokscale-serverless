@@ -17,3 +17,5 @@ chrono = "0.4"
 uuid = { version = "1", features = ["v4"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rpassword = "7.5.4"
+hostname = "0.4.2"

@@ -7,7 +7,6 @@
 use crate::handlers::{export_payload, FilterQuery};
 use crate::state::AppState;
 use std::sync::Arc;
-use std::time::Duration;
 
 pub fn spawn_push(state: Arc<AppState>) {
     tokio::spawn(async move {
@@ -29,10 +28,7 @@ async fn push(state: &Arc<AppState>) -> Result<(), String> {
     let payload = export_payload(&snap, &state.device, &FilterQuery::default())
         .map_err(|e| format!("failed to build export payload: {e:?}"))?;
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|e| format!("failed to build http client: {e}"))?;
+    let client = crate::connect::http_client()?;
     let mut request = client.post(&url).json(&payload);
     if let Some(token) = &state.cfg.sync_token {
         request = request.bearer_auth(token);

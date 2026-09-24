@@ -1,6 +1,7 @@
 mod auth;
 mod coeffs;
 mod config;
+mod connect;
 mod device;
 mod error;
 mod export;
@@ -12,6 +13,7 @@ mod sync;
 
 use axum::routing::{get, post};
 use axum::Router;
+use std::io::IsTerminal;
 use std::sync::Arc;
 
 #[tokio::main]
@@ -23,13 +25,54 @@ async fn main() {
         )
         .init();
 
-    let cfg = match config::Config::from_env() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let command = args.first().map(String::as_str).unwrap_or("");
+    if matches!(command, "--help" | "-h" | "help") {
+        println!("tokscale-client [connect [WORKER_URL] | run | local]\n\n  connect  Verify and save Worker URL/token (token input is hidden)\n  run      Collect and sync using saved credentials, without prompts\n  local    Collect locally without cloud sync\n\nWith no command, first-time interactive startup offers connection setup.\nConfiguration: {}\nEnvironment variables override saved configuration.", config::connection_path().display());
+        return;
+    }
+    if command == "connect" && args.len() <= 2 {
+        if let Err(error) = connect::connect(args.get(1).cloned()).await {
+            eprintln!("connection error: {error}");
+            std::process::exit(2);
+        }
+        return;
+    }
+    if !matches!(command, "" | "run" | "local") || args.len() > 1 {
+        eprintln!("usage: tokscale-client [connect [WORKER_URL] | run | local]");
+        std::process::exit(2);
+    }
+
+    let configuration = if command == "local" {
+        config::Config::local_from_env()
+    } else {
+        config::Config::from_env()
+    };
+    let mut cfg = match configuration {
         Ok(cfg) => cfg,
         Err(e) => {
             eprintln!("configuration error: {e}");
             std::process::exit(2);
         }
     };
+    if command.is_empty()
+        && cfg.sync_url.is_none()
+        && std::env::var_os("SYNC_URL").is_none()
+        && std::io::stdin().is_terminal()
+    {
+        if let Err(error) = connect::connect(None).await {
+            eprintln!("connection error: {error}");
+            std::process::exit(2);
+        }
+        cfg = config::Config::from_env().unwrap_or_else(|error| {
+            eprintln!("configuration error: {error}");
+            std::process::exit(2);
+        });
+    }
+    if command == "run" && cfg.sync_url.is_none() {
+        eprintln!("no Worker connection configured; run `tokscale-client connect` first");
+        std::process::exit(2);
+    }
     let bind_addr = cfg.bind_addr.clone();
     let auth_enabled = cfg.api_token.is_some();
     let state = Arc::new(state::AppState::new(cfg, device::resolve()));
@@ -56,10 +99,9 @@ async fn main() {
             loop {
                 tokio::time::sleep(interval).await;
                 match scan::refresh(&state).await {
-                    Ok(scan::RefreshOutcome::Completed(snap)) => tracing::info!(
-                        messages = snap.messages.len(),
-                        "periodic rescan complete"
-                    ),
+                    Ok(scan::RefreshOutcome::Completed(snap)) => {
+                        tracing::info!(messages = snap.messages.len(), "periodic rescan complete")
+                    }
                     Ok(scan::RefreshOutcome::AlreadyScanning) => {}
                     Err(e) => tracing::error!("periodic rescan failed: {e}"),
                 }
@@ -106,5 +148,22 @@ async fn main() {
 }
 
 async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut terminate) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {},
+                    _ = terminate.recv() => {},
+                }
+            }
+            Err(error) => {
+                tracing::warn!("could not install SIGTERM handler: {error}");
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
     let _ = tokio::signal::ctrl_c().await;
 }

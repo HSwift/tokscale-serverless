@@ -80,7 +80,11 @@ async fn run_scan(
                 .is_none_or(|list| list.iter().any(|c| c == qoder::QODER_CLIENT));
             let mut credits = Vec::new();
             if lane_enabled {
-                let scan = qoder::scan(&lane_home(&cfg), &crate::coeffs::CoeffTable::load());
+                let scan = qoder::scan(
+                    &lane_home(&cfg),
+                    cfg.use_env_roots,
+                    &crate::coeffs::CoeffTable::load(),
+                );
                 tracing::info!(
                     messages = scan.messages.len(),
                     credits_rows = scan.credits.len(),
@@ -89,7 +93,12 @@ async fn run_scan(
                 messages.extend(scan.messages);
                 credits = scan.credits;
             }
-            Ok((messages, credits, pricing_loaded, started.elapsed().as_millis()))
+            Ok((
+                messages,
+                credits,
+                pricing_loaded,
+                started.elapsed().as_millis(),
+            ))
         })
     })
     .await
@@ -100,8 +109,5 @@ fn lane_home(cfg: &Config) -> PathBuf {
     if let Some(home) = &cfg.tokscale_home {
         return PathBuf::from(home);
     }
-    std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("."))
+    tokscale_core::paths::home_dir().unwrap_or_else(|| PathBuf::from("."))
 }
