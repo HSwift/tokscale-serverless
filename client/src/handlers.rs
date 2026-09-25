@@ -1,9 +1,9 @@
+use crate::device::DeviceInfo;
 use crate::error::AppError;
 use crate::export::{to_ts_daily, TsDateRange, TsExport, TsExportMeta, TsTokenBreakdown};
 use crate::qoder::{QoderCredit, QODER_CLIENT};
 use crate::scan::{self, RefreshOutcome};
 use crate::state::{AppState, Snapshot};
-use crate::device::DeviceInfo;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -129,10 +129,7 @@ pub fn export_payload(
             to_ts_daily(
                 day,
                 snap.pricing_loaded,
-                credits
-                    .get(day.date.as_str())
-                    .copied()
-                    .filter(|c| *c > 0.0),
+                credits.get(day.date.as_str()).copied().filter(|c| *c > 0.0),
             )
         })
         .collect();
@@ -151,11 +148,9 @@ pub fn export_payload(
 
 pub async fn refresh(State(state): State<Arc<AppState>>) -> Result<Response, AppError> {
     match scan::refresh(&state).await.map_err(AppError::Core)? {
-        RefreshOutcome::AlreadyScanning => Ok((
-            StatusCode::ACCEPTED,
-            Json(json!({ "scanning": true })),
-        )
-            .into_response()),
+        RefreshOutcome::AlreadyScanning => {
+            Ok((StatusCode::ACCEPTED, Json(json!({ "scanning": true }))).into_response())
+        }
         RefreshOutcome::Completed(snap) => Ok(Json(json!({
             "scanning": false,
             "messages": snap.messages.len(),
@@ -423,8 +418,15 @@ mod tests {
     #[test]
     fn validate_date_rejects_bad_dates() {
         for bad in [
-            "2026-13-99", "2026-02-30", "2023-02-29", "2026-9-1", "2026-09-1x", "", "abcd",
-            "2026/09/01", "20260901",
+            "2026-13-99",
+            "2026-02-30",
+            "2023-02-29",
+            "2026-9-1",
+            "2026-09-1x",
+            "",
+            "abcd",
+            "2026/09/01",
+            "20260901",
         ] {
             assert!(!validate_date(bad), "{bad}");
         }
@@ -446,7 +448,11 @@ mod tests {
         .unwrap();
         assert_eq!(ranged.len(), 1);
         assert_eq!(ranged[0].client, "codex");
-        let both = filter_messages(&messages, &query(Some("claude,codex"), Some("2026-09-03"), None)).unwrap();
+        let both = filter_messages(
+            &messages,
+            &query(Some("claude,codex"), Some("2026-09-03"), None),
+        )
+        .unwrap();
         assert_eq!(both.len(), 1);
     }
 

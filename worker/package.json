@@ -3,13 +3,21 @@
   "version": "0.0.0",
   "private": true,
   "scripts": {
+    "build": "npm run build:api && npm run build:console",
+    "build:api": "wrangler deploy --config api/wrangler.jsonc --dry-run --outdir dist/api",
+    "build:console": "wrangler deploy --config console/wrangler.jsonc --dry-run --outdir dist/console",
+    "check": "npm run typecheck && npm run db:migrate && npm run test:ci",
     "deploy": "wrangler deploy --config api/wrangler.jsonc",
+    "deploy:api": "npm run db:migrate:remote && wrangler deploy --config api/wrangler.jsonc",
+    "deploy:console": "wrangler deploy --config console/wrangler.jsonc",
     "dev": "wrangler dev --config api/wrangler.jsonc",
     "dev:console": "wrangler dev --config console/wrangler.jsonc --ip 127.0.0.1 --port 8789 --inspector-port 9230",
     "start": "wrangler dev --config api/wrangler.jsonc",
     "db:migrate": "wrangler d1 migrations apply DB --local --config api/wrangler.jsonc",
+    "db:migrate:remote": "wrangler d1 migrations apply DB --remote --config api/wrangler.jsonc",
     "typecheck": "tsc --noEmit",
     "test": "vitest",
+    "test:ci": "vitest run",
     "cf-typegen": "wrangler types --config api/wrangler.jsonc"
   },
   "devDependencies": {

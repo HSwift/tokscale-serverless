@@ -92,11 +92,13 @@ Windows PowerShell：
 
 ## 部署到 Cloudflare
 
+本项目将发布流程分开：**GitHub Actions 构建 Rust 采集器，Cloudflare Workers Builds 构建并部署云端服务**。部署者使用自己的 Cloudflare 账号、D1 数据库和 `INGEST_TOKEN`，无需在 GitHub 中配置 Cloudflare 部署凭据。先按下面的步骤完成首次部署，再连接仓库开启自动构建。
+
 ### 1. 准备账号与工具
 
 需要一个可使用 Workers、D1 的 Cloudflare 账号，以及 Node.js 24 和 npm。只有从源码编译采集器时才需要 Rust。
 
-获取本仓库代码后，在**仓库根目录**安装依赖，再进入 `worker` 目录：
+计划使用自动构建时，先将本仓库 fork 到自己的 GitHub 账号。获取代码后，在**仓库根目录**安装依赖，再进入 `worker` 目录：
 
 ```bash
 npm --prefix worker ci
@@ -205,6 +207,30 @@ npx wrangler secret put INGEST_TOKEN --config console/wrangler.jsonc
 
 采集器连接的是 **API Worker URL**；浏览器访问的是 **Console Worker URL**。
 
+### 8. 开启 Cloudflare 原生自动构建
+
+首次部署完成后，分别进入 Cloudflare 控制台中的两个 Worker，打开 **Settings → Builds → Connect**，授权 Cloudflare GitHub App 访问自己的 fork，并连接同一个仓库。后续推送由 [Workers Builds](https://developers.cloudflare.com/workers/ci-cd/builds/) 在 Cloudflare 内完成检查、构建和部署。
+
+按下表配置两个 Worker。若修改过 Worker 名称，控制台名称必须与对应 `wrangler.jsonc` 中的 `name` 一致；控制台 Worker 的 Service Binding 也需指向自己的 API Worker。
+
+| 设置 | API Worker | Console Worker |
+| --- | --- | --- |
+| 生产分支 | `main` | `main` |
+| Root directory | `worker/api` | `worker/console` |
+| Build command | `npm --prefix .. ci && npm --prefix .. run check && npm --prefix .. run build:api` | `npm --prefix .. ci && npm --prefix .. run check && npm --prefix .. run build:console` |
+| Deploy command | `npm --prefix .. run deploy:api` | `npm --prefix .. run deploy:console` |
+| Build variable：`NODE_VERSION` | `24` | `24` |
+| Build variable：`SKIP_DEPENDENCY_INSTALL` | `1` | `1` |
+| 非生产分支构建 | 关闭 | 关闭 |
+
+每个 Worker 的根目录都包含自己的 Wrangler 配置；共享的 `package.json`、锁文件和测试配置位于上一级 `worker/`，所以命令使用 `npm --prefix ..`。这是本仓库的[多 Worker 构建布局](https://developers.cloudflare.com/workers/ci-cd/builds/advanced-setups/)。`SKIP_DEPENDENCY_INSTALL=1` 关闭平台默认安装，改由构建命令中的 `npm ci` 严格使用锁文件；Node 版本和该变量均在 **Build variables and secrets** 中设置，详见[构建镜像配置](https://developers.cloudflare.com/workers/ci-cd/builds/build-image/)。
+
+在 Builds 的 API token 设置中，可以选择由 Cloudflare 自动生成并管理的 token。API 的部署命令还会执行远程 D1 迁移，因此其构建 token 需要目标账号的 **D1 → Edit** 权限；可在 Cloudflare 的 **My Profile → API Tokens** 中调整，或选择已有的合适 token。构建鉴权留在 Cloudflare 内，不需要复制到 GitHub。参见[构建 token 配置](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/#api-token)。
+
+`INGEST_TOKEN` 与上述部署 token 用途不同：它用于采集器和 API 之间的认证，应在两个 Worker 的 **Settings → Variables and Secrets** 中设置为相同的运行时 Secret，或使用前面的 `wrangler secret put` 命令。构建过程不需要它，不要把它放进源码、GitHub Actions 或 Build variables。之前已经设置的 Worker Secret 在普通代码部署时会保留。
+
+保存后推送一次提交，在两个 Worker 的 Builds 页面查看结果。`check` 依次执行 TypeScript 检查、本地 D1 迁移验证和 Worker 测试；`build:api` / `build:console` 只打包，不发布。全部成功后才执行对应的部署命令；API 会先迁移远程 D1，再部署代码。后续数据库迁移应兼容仍在运行的旧版本代码。两个 Worker 独立构建，不保证先后顺序，跨 Worker 的接口更新也应保持兼容。
+
 ### 自定义域名与访问控制
 
 使用自定义域名时，域名对应的 zone 需在自己的 Cloudflare 账号中。将两个配置里的 `routes` 分别设置为自己的域名，然后重新部署。API 的配置示例：
@@ -236,13 +262,13 @@ npx wrangler secret put INGEST_TOKEN --config console/wrangler.jsonc
 
 ### 后续更新
 
-在 `worker/` 目录安装新版本依赖、执行迁移并重新部署：
+已开启 Workers Builds 时，将更改推送到连接仓库的 `main`，由 Cloudflare 自动更新两个 Worker。若仍使用手动部署，在 `worker/` 目录执行：
 
 ```bash
 npm ci
-npx wrangler d1 migrations apply DB --remote --config api/wrangler.jsonc
-npx wrangler deploy --config api/wrangler.jsonc
-npx wrangler deploy --config console/wrangler.jsonc
+npm run check
+npm run deploy:api
+npm run deploy:console
 ```
 
 普通代码更新无需重新设置 token。更换 token 时，两个 Worker 和每台采集器都需要更新；采集器可重新执行 `connect`。
@@ -352,12 +378,18 @@ cargo run --locked -p tokscale-client -- run
 ### 验证与发布
 
 ```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
-npm --prefix worker run typecheck
-npm --prefix worker test -- --run
+npm --prefix worker run check
+npm --prefix worker run build
 ```
 
-[`build.yml`](.github/workflows/build.yml) 在四个目标系统/架构上运行 release 模式测试，通过后打包上传。推送 `v*` 标签时发布 GitHub Release；该工作流只发布采集器，不会自动部署 Cloudflare 服务。
+[`build.yml`](.github/workflows/build.yml) 包含独立的格式和 Clippy 检查，并在四个目标系统/架构上运行 release 模式测试、构建和打包。推送 `v*` 标签时，只有检查和全部平台构建都通过，才会发布 GitHub Release，并附带 `SHA256SUMS` 校验文件。该工作流只发布采集器，不会自动部署 Cloudflare 服务。
+
+工作流使用完整 commit SHA 固定 Action，由 Dependabot 每周检查更新。Rust 缓存区分目标平台和编译参数，只有主分支保存缓存。Action 自带的 Node.js 运行环境仅用于 GitHub CI，下载后的采集器不需要安装 Node.js。
+
+云端服务使用上文的 Cloudflare Workers Builds，构建环境为 Node.js 24。`npm --prefix worker run build` 可在本地生成两个 Worker 的 bundle，输出位于 `worker/dist/`；该命令使用 Wrangler `--dry-run`，不会部署线上服务。`check` 只使用本地数据库，`deploy:api` 则会迁移远程 D1 并部署 API，`deploy:console` 部署控制台。
 
 采集器构建包只包含可执行文件。用户配置在运行时创建；`.dev.vars`、Wrangler 本地数据库和构建目录已被 Git 忽略。采集器统计快照保存在内存，上游解析器使用本地缓存，跨主机历史汇总保存在 D1。
 

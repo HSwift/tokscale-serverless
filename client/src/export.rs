@@ -178,7 +178,8 @@ mod tests {
         assert!(value["clients"][0].get("providerId").is_none());
         assert!(value.get("activeTimeMs").is_none());
         assert!(value["totals"].get("credits").is_none());
-        let with_credits = serde_json::to_value(to_ts_daily(&fixture_day(), true, Some(3.5))).unwrap();
+        let with_credits =
+            serde_json::to_value(to_ts_daily(&fixture_day(), true, Some(3.5))).unwrap();
         assert_eq!(with_credits["totals"]["credits"], 3.5);
         assert!(with_credits["totals"].get("costIsComplete").is_none());
     }
