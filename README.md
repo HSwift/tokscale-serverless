@@ -254,7 +254,7 @@ npm --prefix worker run check
 npm --prefix worker run build
 ```
 
-[`build.yml`](.github/workflows/build.yml) runs separate formatting and Clippy checks, then tests in release mode, builds, and packages the collector for all four platform and architecture targets. Pushing a `v*` tag publishes a GitHub Release with a `SHA256SUMS` checksum file only after the checks and every platform build succeed. This workflow publishes the collector only; it does not deploy Cloudflare services.
+[`build.yml`](.github/workflows/build.yml) runs separate formatting and Clippy checks, then tests in release mode, builds, and packages the collector for all four platform and architecture targets. Pushing a `v*` tag creates a **draft GitHub Release** with the platform archives, `SHA256SUMS`, and generated release notes only after the checks and every platform build succeed. Review and publish the draft manually in GitHub Releases. This workflow packages the collector only; it does not deploy Cloudflare services.
 
 Actions are pinned to full commit SHAs, with Dependabot checking for updates weekly. Rust caches are separated by target platform and compiler flags, and only the main branch saves caches. The Node.js runtime used by Actions is part of GitHub CI; downloaded collectors do not require Node.js.
 

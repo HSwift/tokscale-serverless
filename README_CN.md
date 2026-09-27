@@ -252,7 +252,7 @@ npm --prefix worker run check
 npm --prefix worker run build
 ```
 
-[`build.yml`](.github/workflows/build.yml) 包含独立的格式和 Clippy 检查，并在四个目标系统/架构上运行 release 模式测试、构建和打包。推送 `v*` 标签时，只有检查和全部平台构建都通过，才会发布 GitHub Release，并附带 `SHA256SUMS` 校验文件。该工作流只发布采集器，不会自动部署 Cloudflare 服务。
+[`build.yml`](.github/workflows/build.yml) 包含独立的格式和 Clippy 检查，并在四个目标系统/架构上运行 release 模式测试、构建和打包。推送 `v*` 标签时，只有检查和全部平台构建都通过，才会创建 **GitHub Release 草稿**，附带各平台压缩包、`SHA256SUMS` 校验文件和自动生成的发布说明。在 GitHub Releases 中审核后手动发布。该工作流只打包采集器，不会自动部署 Cloudflare 服务。
 
 工作流使用完整 commit SHA 固定 Action，由 Dependabot 每周检查更新。Rust 缓存区分目标平台和编译参数，只有主分支保存缓存。Action 自带的 Node.js 运行环境仅用于 GitHub CI，下载后的采集器不需要安装 Node.js。
 
