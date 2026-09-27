@@ -23,9 +23,9 @@
 			"binding": "API",
 			"service": "tokscale-serverless-api"
 		}
-	],
-	// Use workers.dev by default; add your own custom domain if needed.
-	"routes": []
+	]
+	// Custom domains are managed in the Cloudflare dashboard.
+	// Leave route/routes unset so deployment does not declare domain bindings.
 	// Secrets: INGEST_TOKEN (same shared token as the api worker) — set with
 	// `npx wrangler secret put INGEST_TOKEN --config console/wrangler.jsonc`.
 	// Used only to authorize server-side read proxies until Access fronts this

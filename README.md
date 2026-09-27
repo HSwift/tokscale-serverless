@@ -117,13 +117,13 @@ Run all subsequent Cloudflare commands from **`worker/`**. The `login` command o
 npx wrangler d1 create tokscale-serverless --config api/wrangler.jsonc
 ```
 
-Record the `database_id` returned by the command. You can reuse an existing database's name and ID instead of creating another one. See the [Cloudflare D1 documentation](https://developers.cloudflare.com/d1/wrangler-commands/) for database creation and migration commands.
+If the `tokscale-serverless` database already exists, skip creation and reuse it. Keep its name in `database_name`; you do not need to copy its ID into the repository or set a `D1_DATABASE_ID` build variable. If Wrangler offers to write the newly created database ID into your configuration, decline or remove that field afterward. See the [Cloudflare D1 documentation](https://developers.cloudflare.com/d1/wrangler-commands/) for database creation and migration commands.
 
 ### 3. Configure both Workers
 
-The Wrangler files in this repository use `workers.dev` by default, with no custom domains or account-specific resource IDs. Before deploying, replace `YOUR_D1_DATABASE_ID` in the API configuration with your own database ID. The following are complete minimal configurations using `workers.dev` domains.
+The Wrangler files in this repository use `workers.dev` by default, with no custom domains or account-specific resource IDs. The D1 configuration declares the `DB` binding and the `tokscale-serverless` database name, omitting `database_id`. With the locked Wrangler version, deployment reuses an existing `DB` binding when its database name matches, or resolves the existing database by name. Remote migration commands also resolve this name. Keep the dashboard binding and `database_name` consistent if you use a different database. See [Wrangler resource provisioning](https://developers.cloudflare.com/workers/wrangler/configuration/#automatic-provisioning).
 
-Replace [`api/wrangler.jsonc`](worker/api/wrangler.jsonc) with the following, inserting the database ID from the previous step:
+The following is a minimal [`api/wrangler.jsonc`](worker/api/wrangler.jsonc) configuration:
 
 ```jsonc
 {
@@ -132,12 +132,10 @@ Replace [`api/wrangler.jsonc`](worker/api/wrangler.jsonc) with the following, in
   "main": "./src/index.ts",
   "compatibility_date": "2026-09-16",
   "workers_dev": true,
-  "routes": [],
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "tokscale-serverless",
-      "database_id": "YOUR_D1_DATABASE_ID",
       "migrations_dir": "migrations"
     }
   ]
@@ -153,7 +151,6 @@ Replace [`console/wrangler.jsonc`](worker/console/wrangler.jsonc) with:
   "main": "./src/worker.ts",
   "compatibility_date": "2026-09-16",
   "workers_dev": true,
-  "routes": [],
   "assets": {
     "directory": "./public",
     "binding": "ASSETS",
@@ -168,7 +165,7 @@ Replace [`console/wrangler.jsonc`](worker/console/wrangler.jsonc) with:
 }
 ```
 
-You can customize each Worker's `name`, but the console's `services[].service` must exactly match the API Worker's name. Keep the binding names `DB`, `API`, and `ASSETS` unchanged, as the code uses them. Leave `routes: []` unless you want to configure your own custom domains.
+You can customize each Worker's `name`, but the console's `services[].service` must exactly match the API Worker's name. Keep the binding names `DB`, `API`, and `ASSETS` unchanged, as the code uses them. Leave both `route` and `routes` unset; manage custom domains in the Cloudflare dashboard.
 
 ### 4. Initialize the remote database
 
@@ -235,15 +232,11 @@ Save the settings, push a commit, and check the Builds page for each Worker. The
 
 ### Custom domains and access control
 
-To use custom domains, their zone must be in your Cloudflare account. Set `routes` in each configuration to your own domain, then redeploy. For example, the API configuration can use:
+To use custom domains, their zone must be in your Cloudflare account. Open each Worker in the dashboard and select **Settings → Domains & Routes → Add → Custom Domain**. Bind your API domain to the API Worker and your console domain to the Console Worker. Existing bindings can be kept as they are.
 
-```jsonc
-"routes": [
-  { "pattern": "usage-api.example.com", "custom_domain": true }
-]
-```
+No `CUSTOM_DOMAIN` build variable is required. Keep personal domains out of the repository and leave `route` and `routes` unset in both Wrangler files. The default configuration also enables `workers.dev`; to serve only through your custom domains, set `workers_dev` to `false` in the corresponding configuration.
 
-The console can use `usage.example.com`. Cloudflare configures routing and certificates for a [Worker Custom Domain](https://developers.cloudflare.com/workers/configuration/routing/custom-domains/). Resolve any conflicting DNS records for the domain first.
+Cloudflare configures routing and certificates for a [Worker Custom Domain](https://developers.cloudflare.com/workers/configuration/routing/custom-domains/). Resolve any conflicting DNS records for the domain first.
 
 To make the dashboard private:
 

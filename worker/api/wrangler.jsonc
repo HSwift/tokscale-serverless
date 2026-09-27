@@ -13,8 +13,8 @@
 		"enabled": true
 	},
 	"upload_source_maps": true,
-	// Add your own custom domain here if needed; see README.md.
-	"routes": [],
+	// Custom domains are managed in the Cloudflare dashboard.
+	// Leave route/routes unset so deployment does not declare domain bindings.
 	// Access JWT verification (console frontend authenticates via Cloudflare
 	// Access; the API re-verifies the assertion cryptographically). Identifiers,
 	// not secrets. Until real values replace the placeholders, Access auth is
@@ -27,8 +27,8 @@
 		{
 			"binding": "DB",
 			"database_name": "tokscale-serverless",
-			// Replace with the ID returned by `wrangler d1 create` before deployment.
-			"database_id": "YOUR_D1_DATABASE_ID",
+			// Omit database_id so Wrangler reuses the existing DB binding or
+			// resolves this database name in the deployment account.
 			"migrations_dir": "migrations"
 		}
 	]

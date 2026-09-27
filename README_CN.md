@@ -115,13 +115,13 @@ npx wrangler whoami
 npx wrangler d1 create tokscale-serverless --config api/wrangler.jsonc
 ```
 
-记录命令返回的 `database_id`。已有数据库时可以复用对应的名称和 ID，无需重新创建。创建与迁移命令的说明见 [Cloudflare D1 文档](https://developers.cloudflare.com/d1/wrangler-commands/)。
+如果已经存在 `tokscale-serverless` 数据库，跳过创建并直接复用。在 `database_name` 中保留对应名称即可，无需将数据库 ID 写入仓库，也无需设置 `D1_DATABASE_ID` 构建变量。如果 Wrangler 提示将新建数据库的 ID 写入配置，可拒绝或随后移除该字段。创建与迁移命令的说明见 [Cloudflare D1 文档](https://developers.cloudflare.com/d1/wrangler-commands/)。
 
 ### 3. 配置两个 Worker
 
-仓库中的 Wrangler 文件默认使用 `workers.dev`，不包含自定义域名或个人账号的资源 ID。部署前，将 API 配置中的 `YOUR_D1_DATABASE_ID` 替换为自己的数据库 ID。下面给出使用 `workers.dev` 域名的完整最小配置。
+仓库中的 Wrangler 文件默认使用 `workers.dev`，不包含自定义域名或个人账号的资源 ID。D1 配置声明 `DB` 绑定和 `tokscale-serverless` 数据库名称，省略 `database_id`。当前锁定版本的 Wrangler 部署时会复用名称匹配的已有 `DB` 绑定，或按名称查找已有数据库；远程迁移命令也会按名称解析。如果使用其他数据库，保持控制台绑定与 `database_name` 一致。参见 [Wrangler 资源配置说明](https://developers.cloudflare.com/workers/wrangler/configuration/#automatic-provisioning)。
 
-将 [`api/wrangler.jsonc`](worker/api/wrangler.jsonc) 改为以下内容，并填入上一步返回的数据库 ID：
+[`api/wrangler.jsonc`](worker/api/wrangler.jsonc) 的最小配置如下：
 
 ```jsonc
 {
@@ -130,12 +130,10 @@ npx wrangler d1 create tokscale-serverless --config api/wrangler.jsonc
   "main": "./src/index.ts",
   "compatibility_date": "2026-09-16",
   "workers_dev": true,
-  "routes": [],
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "tokscale-serverless",
-      "database_id": "YOUR_D1_DATABASE_ID",
       "migrations_dir": "migrations"
     }
   ]
@@ -151,7 +149,6 @@ npx wrangler d1 create tokscale-serverless --config api/wrangler.jsonc
   "main": "./src/worker.ts",
   "compatibility_date": "2026-09-16",
   "workers_dev": true,
-  "routes": [],
   "assets": {
     "directory": "./public",
     "binding": "ASSETS",
@@ -166,7 +163,7 @@ npx wrangler d1 create tokscale-serverless --config api/wrangler.jsonc
 }
 ```
 
-可以自定义两个 Worker 的 `name`，但控制台的 `services[].service` 必须与 API Worker 的名称完全一致。代码使用的绑定名称 `DB`、`API`、`ASSETS` 应保持不变。不使用自己的自定义域名时，保留 `routes: []`。
+可以自定义两个 Worker 的 `name`，但控制台的 `services[].service` 必须与 API Worker 的名称完全一致。代码使用的绑定名称 `DB`、`API`、`ASSETS` 应保持不变。不声明 `route` 和 `routes`，自定义域名在 Cloudflare 控制台管理。
 
 ### 4. 初始化远程数据库
 
@@ -233,15 +230,11 @@ npx wrangler secret put INGEST_TOKEN --config console/wrangler.jsonc
 
 ### 自定义域名与访问控制
 
-使用自定义域名时，域名对应的 zone 需在自己的 Cloudflare 账号中。将两个配置里的 `routes` 分别设置为自己的域名，然后重新部署。API 的配置示例：
+使用自定义域名时，域名对应的 zone 需在自己的 Cloudflare 账号中。在控制台中分别进入两个 Worker，选择 **Settings → Domains & Routes → Add → Custom Domain**，将 API 域名绑定到 API Worker，将控制台域名绑定到 Console Worker。已有绑定可直接保留。
 
-```jsonc
-"routes": [
-  { "pattern": "usage-api.example.com", "custom_domain": true }
-]
-```
+无需配置 `CUSTOM_DOMAIN` 构建变量。个人域名不写入仓库，两份 Wrangler 配置均不声明 `route` 和 `routes`。默认配置同时启用 `workers.dev`；如果只通过自定义域名访问，将对应配置中的 `workers_dev` 设为 `false`。
 
-控制台可使用 `usage.example.com`。Cloudflare 会为 [Worker Custom Domain](https://developers.cloudflare.com/workers/configuration/routing/custom-domains/) 配置对应路由及证书；若域名已有冲突的 DNS 记录，先处理冲突。
+Cloudflare 会为 [Worker Custom Domain](https://developers.cloudflare.com/workers/configuration/routing/custom-domains/) 配置对应路由及证书；若域名已有冲突的 DNS 记录，先处理冲突。
 
 如需私有面板：
 
