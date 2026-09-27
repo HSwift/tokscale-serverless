@@ -15,14 +15,12 @@
 	"upload_source_maps": true,
 	// Custom domains are managed in the Cloudflare dashboard.
 	// Leave route/routes unset so deployment does not declare domain bindings.
-	// Access JWT verification (console frontend authenticates via Cloudflare
-	// Access; the API re-verifies the assertion cryptographically). Identifiers,
-	// not secrets. Until real values replace the placeholders, Access auth is
-	// inert and only the bearer token works.
-	"vars": {
-		"ACCESS_TEAM_DOMAIN": "https://replace-with-team.cloudflareaccess.com",
-		"ACCESS_AUD": "replace-with-access-application-aud"
-	},
+	// Set ACCESS_TEAM_DOMAIN and ACCESS_AUD in the API Worker's dashboard
+	// variables. Preserve those deployment-specific values on future deploys.
+	// The API verifies the console application's Access JWT; bearer auth also
+	// remains available for collectors. Without these variables, only bearer
+	// authentication is enabled.
+	"keep_vars": true,
 	"d1_databases": [
 		{
 			"binding": "DB",

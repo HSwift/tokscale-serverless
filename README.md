@@ -94,179 +94,53 @@ Repeat these steps on other hosts using the same API URL and token to view them 
 
 ## Deploy to Cloudflare
 
-**GitHub Actions builds the Rust collector; Cloudflare Workers Builds builds and deploys the cloud services.** Each deployer uses their own Cloudflare account, D1 database, and `INGEST_TOKEN`. No Cloudflare deployment credentials need to be configured in GitHub. Complete the initial deployment below, then connect your repository to enable automatic builds.
+Deploy two Workers and one D1 database in your own Cloudflare account. **Cloudflare Workers Builds deploys the cloud services; GitHub Actions only builds the collector.** Cloudflare credentials stay in Cloudflare.
 
-### 1. Prepare your account and tools
+### 1. Prepare the repository and database
 
-You need a Cloudflare account with access to Workers and D1, plus Node.js 24 and npm. Rust is only required if you build the collector from source.
+Fork this repository. In Cloudflare, create a D1 database named `tokscale-serverless`, or reuse an existing database with that name. The included Wrangler configuration declares the `DB` binding and resolves the database by name; no `D1_DATABASE_ID` variable or personal database ID in Git is needed.
 
-If you plan to use automatic builds, first fork this repository into your own GitHub account. After checking out the code, install dependencies from the **repository root**, then enter the `worker` directory:
+### 2. Connect both Workers to GitHub
 
-```bash
-npm --prefix worker ci
-cd worker
-npx wrangler login
-npx wrangler whoami
-```
-
-Run all subsequent Cloudflare commands from **`worker/`**. The `login` command opens a browser to authorize your account, and `whoami` lets you verify the target account. If you have multiple accounts, you can specify the target `account_id` in both Wrangler configuration files.
-
-### 2. Create a D1 database
-
-```bash
-npx wrangler d1 create tokscale-serverless --config api/wrangler.jsonc
-```
-
-If the `tokscale-serverless` database already exists, skip creation and reuse it. Keep its name in `database_name`; you do not need to copy its ID into the repository or set a `D1_DATABASE_ID` build variable. If Wrangler offers to write the newly created database ID into your configuration, decline or remove that field afterward. See the [Cloudflare D1 documentation](https://developers.cloudflare.com/d1/wrangler-commands/) for database creation and migration commands.
-
-### 3. Configure both Workers
-
-The Wrangler files in this repository use `workers.dev` by default, with no custom domains or account-specific resource IDs. The D1 configuration declares the `DB` binding and the `tokscale-serverless` database name, omitting `database_id`. With the locked Wrangler version, deployment reuses an existing `DB` binding when its database name matches, or resolves the existing database by name. Remote migration commands also resolve this name. Keep the dashboard binding and `database_name` consistent if you use a different database. See [Wrangler resource provisioning](https://developers.cloudflare.com/workers/wrangler/configuration/#automatic-provisioning).
-
-The following is a minimal [`api/wrangler.jsonc`](worker/api/wrangler.jsonc) configuration:
-
-```jsonc
-{
-  "$schema": "../node_modules/wrangler/config-schema.json",
-  "name": "tokscale-serverless-api",
-  "main": "./src/index.ts",
-  "compatibility_date": "2026-09-16",
-  "workers_dev": true,
-  "d1_databases": [
-    {
-      "binding": "DB",
-      "database_name": "tokscale-serverless",
-      "migrations_dir": "migrations"
-    }
-  ]
-}
-```
-
-Replace [`console/wrangler.jsonc`](worker/console/wrangler.jsonc) with:
-
-```jsonc
-{
-  "$schema": "../node_modules/wrangler/config-schema.json",
-  "name": "tokscale-serverless-console",
-  "main": "./src/worker.ts",
-  "compatibility_date": "2026-09-16",
-  "workers_dev": true,
-  "assets": {
-    "directory": "./public",
-    "binding": "ASSETS",
-    "run_worker_first": ["/api", "/api/*"]
-  },
-  "services": [
-    {
-      "binding": "API",
-      "service": "tokscale-serverless-api"
-    }
-  ]
-}
-```
-
-You can customize each Worker's `name`, but the console's `services[].service` must exactly match the API Worker's name. Keep the binding names `DB`, `API`, and `ASSETS` unchanged, as the code uses them. Leave both `route` and `routes` unset; manage custom domains in the Cloudflare dashboard.
-
-### 4. Initialize the remote database
-
-```bash
-npx wrangler d1 migrations apply DB --remote --config api/wrangler.jsonc
-```
-
-The first run creates the required tables. Use `--remote` here; `--local` only modifies the local development database.
-
-### 5. Deploy the API and set the shared token
-
-```bash
-npx wrangler deploy --config api/wrangler.jsonc
-npx wrangler secret put INGEST_TOKEN --config api/wrangler.jsonc
-```
-
-Enter a shared token of your choice when prompted, and save it for the console and each collector. Protected API endpoints reject requests if `INGEST_TOKEN` is not configured; `/health` remains publicly accessible.
-
-Record the API URL printed during deployment, such as `https://tokscale-serverless-api.<your-subdomain>.workers.dev`. If this is your first time using Workers, follow Wrangler's prompts to configure your `workers.dev` subdomain. Configure the production token through [Worker Secrets](https://developers.cloudflare.com/workers/configuration/secrets/); a local `.dev.vars` file does not configure production secrets.
-
-### 6. Deploy the web console
-
-```bash
-npx wrangler deploy --config console/wrangler.jsonc
-npx wrangler secret put INGEST_TOKEN --config console/wrangler.jsonc
-```
-
-Enter **exactly the same token** as for the API. Deploy the API before the console so that the Service Binding can find its target Worker. Record the console URL, such as `https://tokscale-serverless-console.<your-subdomain>.workers.dev`.
-
-The console currently adds the token on the server for read-only requests that have no credentials, so this minimal configuration provides a **publicly readable statistics dashboard**. To restrict access, configure Cloudflare Access as described below before connecting devices. The token is not injected into browser pages, and the console does not proxy ingestion requests.
-
-### 7. Verify the deployment and connect devices
-
-1. Visit `/health` on the API Worker. It should return `{"status":"ok"}`. This checks service liveness only.
-2. On a collector host, run `tokscale-client connect <API_URL>` and enter the same token. Successful verification confirms that authentication works.
-3. Run `tokscale-client run` and wait for the first collection. The logs should include `cloud sync push complete`.
-4. Open the console URL and confirm that devices and usage appear. Usage may be empty if there are no recognized local sessions.
-
-Collectors connect to the **API Worker URL**. Open the **Console Worker URL** in your browser.
-
-### 8. Enable automatic builds in Cloudflare
-
-After the initial deployment, open each Worker in the Cloudflare dashboard and go to **Settings → Builds → Connect**. Authorize the Cloudflare GitHub App to access your fork, and connect both Workers to the same repository. Subsequent pushes trigger checks, builds, and deployments within Cloudflare through [Workers Builds](https://developers.cloudflare.com/workers/ci-cd/builds/).
-
-Configure both Workers as follows. If you changed their names, each name in the dashboard must match `name` in its corresponding `wrangler.jsonc`. The console Worker's Service Binding must also point to your API Worker.
+In **Workers & Pages**, import your fork to create the **API Worker first**, then the Console Worker after the API has deployed. For existing Workers, use **Settings → Builds → Connect**. Both connect to the same repository and `main` branch.
 
 | Setting | API Worker | Console Worker |
 | --- | --- | --- |
-| Production branch | `main` | `main` |
-| Root directory | `worker/api` | `worker/console` |
+| Worker name | `tokscale-serverless-api` | `tokscale-serverless-console` |
+| Root directory | `/worker/api/` | `/worker/console/` |
 | Build command | `npm --prefix .. ci && npm --prefix .. run check && npm --prefix .. run build:api` | `npm --prefix .. ci && npm --prefix .. run check && npm --prefix .. run build:console` |
 | Deploy command | `npm --prefix .. run deploy:api` | `npm --prefix .. run deploy:console` |
-| Build variable: `NODE_VERSION` | `24` | `24` |
-| Build variable: `SKIP_DEPENDENCY_INSTALL` | `1` | `1` |
-| Builds for non-production branches | Disabled | Disabled |
+| Build variables | `NODE_VERSION=24`, `SKIP_DEPENDENCY_INSTALL=1` | Same |
 
-Each Worker's root directory contains its own Wrangler configuration. The shared `package.json`, lockfile, and test configuration live one level above, in `worker/`, so the commands use `npm --prefix ..`. This follows a [multiple-Worker build layout](https://developers.cloudflare.com/workers/ci-cd/builds/advanced-setups/). `SKIP_DEPENDENCY_INSTALL=1` disables the platform's automatic dependency installation; the build command instead uses `npm ci` to install from the lockfile. Set this variable and the Node.js version under **Build variables and secrets**. See the [build image configuration](https://developers.cloudflare.com/workers/ci-cd/builds/build-image/) for details.
+Disable builds for non-production branches unless you configure separate preview resources. Keep the Worker names above, or update the corresponding Wrangler `name` fields and the console's `API` Service Binding together.
 
-In the Builds API token settings, you can select a token automatically generated and managed by Cloudflare. The API deployment command also runs remote D1 migrations, so its build token needs **D1 → Edit** permission for the target account. Adjust this under **My Profile → API Tokens**, or select an existing token with the appropriate permissions. Build credentials stay in Cloudflare and do not need to be copied to GitHub. See the [build token configuration](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/#api-token).
+Select a Cloudflare-managed build token or an appropriate existing token. The API token needs **D1 → Edit** in addition to Worker deployment permissions: `deploy:api` applies database migrations automatically. See [Workers Builds configuration](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/#api-token).
 
-`INGEST_TOKEN` serves a different purpose from the deployment token: it authenticates requests between collectors and the API. Set it to the same runtime Secret on both Workers under **Settings → Variables and Secrets**, or use the earlier `wrangler secret put` commands. It is not needed during builds; keep it out of source code, GitHub Actions, and Build variables. Existing Worker Secrets are retained during ordinary code deployments.
+Once connected, pushes to `main` trigger checks, builds, and deployment for both Workers.
 
-Save the settings, push a commit, and check the Builds page for each Worker. The `check` command runs TypeScript checks, local D1 migration validation, and Worker tests in order. The `build:api` and `build:console` commands bundle the Workers without deploying them. The corresponding deployment command runs only after these steps succeed; the API command migrates remote D1 before deploying code. Future database migrations should remain compatible with the previous code version while it is still running. The two Workers build independently with no guaranteed deployment order, so changes to interfaces between them should also remain backward compatible.
+### 3. Set the token and domains
 
-### Custom domains and access control
+In **each Worker → Settings → Variables and Secrets**, add the same **Secret** named `INGEST_TOKEN`. Save this token for your collectors. This is a runtime secret, not a Build variable or a Cloudflare deployment token.
 
-To use custom domains, their zone must be in your Cloudflare account. Open each Worker in the dashboard and select **Settings → Domains & Routes → Add → Custom Domain**. Bind your API domain to the API Worker and your console domain to the Console Worker. Existing bindings can be kept as they are.
+In **Settings → Domains & Routes → Add → Custom Domain**, bind a domain to the console and optionally another to the API. The console requires a custom domain; its `workers.dev` and version URLs are disabled by default. The API can use its `workers.dev` URL. Domains are managed in Cloudflare; no `CUSTOM_DOMAIN` variable or domain in Git is needed.
 
-No `CUSTOM_DOMAIN` build variable is required. Keep personal domains out of the repository and leave `route` and `routes` unset in both Wrangler files. The default configuration also enables `workers.dev`; to serve only through your custom domains, set `workers_dev` to `false` in the corresponding configuration.
+### 4. Protect the console with Access
 
-Cloudflare configures routing and certificates for a [Worker Custom Domain](https://developers.cloudflare.com/workers/configuration/routing/custom-domains/). Resolve any conflicting DNS records for the domain first.
+Without Access, the console allows public read access to statistics. Before connecting devices:
 
-To make the dashboard private:
+1. In **Zero Trust → Access controls → Applications**, create a [self-hosted application](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/self-hosted-public-app/) for the **console domain**, with the path left empty. Add an **Allow** policy for your email and select a login method, such as [One-time PIN](https://developers.cloudflare.com/cloudflare-one/integrations/identity-providers/one-time-pin/).
+2. In **API Worker → Settings → Variables and Secrets**, add these runtime **text variables**:
 
-1. In Cloudflare Zero Trust, create an [Access self-hosted application](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/self-hosted-public-app/) for the console domain and configure which users may access it.
-2. Obtain your Access team domain and the application's AUD. Add the following `vars` to the API Worker configuration, replacing the placeholders with your values:
+   | Variable | Value |
+   | --- | --- |
+   | `ACCESS_TEAM_DOMAIN` | `https://YOUR_TEAM.cloudflareaccess.com` |
+   | `ACCESS_AUD` | The console Access application's Application Audience (AUD) |
 
-   ```jsonc
-   "vars": {
-     "ACCESS_TEAM_DOMAIN": "https://YOUR_TEAM.cloudflareaccess.com",
-     "ACCESS_AUD": "YOUR_ACCESS_APPLICATION_AUD"
-   }
-   ```
+   The API configuration uses `keep_vars: true` to preserve these dashboard values on deploy. When upgrading from an older configuration with placeholder `vars`, deploy the updated configuration first.
+3. Keep `workers_dev: false` and `preview_urls: false` in [`worker/console/wrangler.jsonc`](worker/console/wrangler.jsonc) to close alternate console entry points. When upgrading, deploy these settings too. Leave the API available for collector bearer-token requests; do not require browser login on its ingestion endpoint.
+4. Verify that a signed-out browser reaches the Access login page and that statistics load after signing in. The API's `/health` should return `200`; `/api/summary` should return `401` without a token and `200` with the collector token.
 
-3. Once the console uses a custom domain, set its `workers_dev` to `false` and add `preview_urls: false` to prevent other public entry points from bypassing the Access policy on the console domain. Redeploy both Workers.
-4. Verify in a signed-out browser that access requires authentication. The API retains bearer token authentication, so collectors continue synchronizing through the API URL. Setting the API's `vars` alone does not create an access policy for the console.
-
-The collector uses bearer tokens and does not support browser login. Do not apply an Access policy that requires interactive login directly to the ingestion endpoint.
-
-### Subsequent updates
-
-With Workers Builds enabled, push changes to `main` in the connected repository to have Cloudflare update both Workers automatically. For manual deployments, run the following from `worker/`:
-
-```bash
-npm ci
-npm run check
-npm run deploy:api
-npm run deploy:console
-```
-
-Ordinary code updates do not require resetting the token. When rotating it, update both Workers and every collector. Run `connect` again on collectors to save the new token.
+Connect each host using the **API URL** and `INGEST_TOKEN` as described in [Quick start](#quick-start-connect-a-collector). Subsequent pushes deploy updates automatically and retain runtime secrets; if you rotate `INGEST_TOKEN`, update both Workers and every collector.
 
 ## Collector configuration
 

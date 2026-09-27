@@ -92,179 +92,53 @@ Windows PowerShell：
 
 ## 部署到 Cloudflare
 
-本项目将发布流程分开：**GitHub Actions 构建 Rust 采集器，Cloudflare Workers Builds 构建并部署云端服务**。部署者使用自己的 Cloudflare 账号、D1 数据库和 `INGEST_TOKEN`，无需在 GitHub 中配置 Cloudflare 部署凭据。先按下面的步骤完成首次部署，再连接仓库开启自动构建。
+在自己的 Cloudflare 账号中部署两个 Worker 和一个 D1 数据库。**Cloudflare Workers Builds 部署云端服务，GitHub Actions 只构建采集器**；Cloudflare 凭据保留在 Cloudflare 中。
 
-### 1. 准备账号与工具
+### 1. 准备仓库和数据库
 
-需要一个可使用 Workers、D1 的 Cloudflare 账号，以及 Node.js 24 和 npm。只有从源码编译采集器时才需要 Rust。
+Fork 本仓库。在 Cloudflare 中创建名为 `tokscale-serverless` 的 D1 数据库，已有同名数据库时直接复用。仓库中的 Wrangler 配置已声明 `DB` 绑定，并按名称查找数据库，无需配置 `D1_DATABASE_ID`，也无需将个人数据库 ID 写入 Git。
 
-计划使用自动构建时，先将本仓库 fork 到自己的 GitHub 账号。获取代码后，在**仓库根目录**安装依赖，再进入 `worker` 目录：
+### 2. 将两个 Worker 连接到 GitHub
 
-```bash
-npm --prefix worker ci
-cd worker
-npx wrangler login
-npx wrangler whoami
-```
+在 **Workers & Pages** 中导入自己的 fork，**先创建 API Worker**，等 API 部署成功后再创建 Console Worker。已有 Worker 则进入 **Settings → Builds → Connect**。两者连接同一仓库的 `main` 分支。
 
-后续 Cloudflare 命令均在 **`worker/` 目录**执行。`login` 使用浏览器完成账号授权，`whoami` 用于核对目标账号；有多个账号时，可在两份 Wrangler 配置中填写目标 `account_id`。
-
-### 2. 创建 D1 数据库
-
-```bash
-npx wrangler d1 create tokscale-serverless --config api/wrangler.jsonc
-```
-
-如果已经存在 `tokscale-serverless` 数据库，跳过创建并直接复用。在 `database_name` 中保留对应名称即可，无需将数据库 ID 写入仓库，也无需设置 `D1_DATABASE_ID` 构建变量。如果 Wrangler 提示将新建数据库的 ID 写入配置，可拒绝或随后移除该字段。创建与迁移命令的说明见 [Cloudflare D1 文档](https://developers.cloudflare.com/d1/wrangler-commands/)。
-
-### 3. 配置两个 Worker
-
-仓库中的 Wrangler 文件默认使用 `workers.dev`，不包含自定义域名或个人账号的资源 ID。D1 配置声明 `DB` 绑定和 `tokscale-serverless` 数据库名称，省略 `database_id`。当前锁定版本的 Wrangler 部署时会复用名称匹配的已有 `DB` 绑定，或按名称查找已有数据库；远程迁移命令也会按名称解析。如果使用其他数据库，保持控制台绑定与 `database_name` 一致。参见 [Wrangler 资源配置说明](https://developers.cloudflare.com/workers/wrangler/configuration/#automatic-provisioning)。
-
-[`api/wrangler.jsonc`](worker/api/wrangler.jsonc) 的最小配置如下：
-
-```jsonc
-{
-  "$schema": "../node_modules/wrangler/config-schema.json",
-  "name": "tokscale-serverless-api",
-  "main": "./src/index.ts",
-  "compatibility_date": "2026-09-16",
-  "workers_dev": true,
-  "d1_databases": [
-    {
-      "binding": "DB",
-      "database_name": "tokscale-serverless",
-      "migrations_dir": "migrations"
-    }
-  ]
-}
-```
-
-将 [`console/wrangler.jsonc`](worker/console/wrangler.jsonc) 改为：
-
-```jsonc
-{
-  "$schema": "../node_modules/wrangler/config-schema.json",
-  "name": "tokscale-serverless-console",
-  "main": "./src/worker.ts",
-  "compatibility_date": "2026-09-16",
-  "workers_dev": true,
-  "assets": {
-    "directory": "./public",
-    "binding": "ASSETS",
-    "run_worker_first": ["/api", "/api/*"]
-  },
-  "services": [
-    {
-      "binding": "API",
-      "service": "tokscale-serverless-api"
-    }
-  ]
-}
-```
-
-可以自定义两个 Worker 的 `name`，但控制台的 `services[].service` 必须与 API Worker 的名称完全一致。代码使用的绑定名称 `DB`、`API`、`ASSETS` 应保持不变。不声明 `route` 和 `routes`，自定义域名在 Cloudflare 控制台管理。
-
-### 4. 初始化远程数据库
-
-```bash
-npx wrangler d1 migrations apply DB --remote --config api/wrangler.jsonc
-```
-
-首次执行会创建所需表结构。这里必须使用 `--remote`；`--local` 仅操作开发环境的本地数据库。
-
-### 5. 部署 API 并设置共享 token
-
-```bash
-npx wrangler deploy --config api/wrangler.jsonc
-npx wrangler secret put INGEST_TOKEN --config api/wrangler.jsonc
-```
-
-按提示输入自己选择的共享 token，并保存以供控制台和各台采集器使用。`INGEST_TOKEN` 未配置时，API 的受保护接口会拒绝请求；`/health` 可公开访问。
-
-记录部署输出的 API URL，例如 `https://tokscale-serverless-api.<你的子域>.workers.dev`。首次使用 Workers 时，按 Wrangler 提示完成 `workers.dev` 子域配置。线上 token 通过 [Worker Secrets](https://developers.cloudflare.com/workers/configuration/secrets/) 设置，不能用本地 `.dev.vars` 代替。
-
-### 6. 部署网页控制台
-
-```bash
-npx wrangler deploy --config console/wrangler.jsonc
-npx wrangler secret put INGEST_TOKEN --config console/wrangler.jsonc
-```
-
-再次输入与 API **完全相同的 token**。API 应先于控制台部署，以便 Service Binding 找到目标 Worker。记录控制台 URL，例如 `https://tokscale-serverless-console.<你的子域>.workers.dev`。
-
-当前控制台会在服务端为无凭据的只读请求附加 token，因此上述最小配置提供的是**公开可读的统计面板**。希望仅自己访问时，在接入设备前按下文配置 Cloudflare Access。token 不会注入浏览器页面，控制台也不代理采集写入接口。
-
-### 7. 验证部署并接入设备
-
-1. 访问 API Worker 的 `/health`，应返回 `{"status":"ok"}`。这一步仅检查服务存活。
-2. 在采集主机上执行 `tokscale-client connect <API_URL>`，输入同一个 token；验证成功说明认证可用。
-3. 执行 `tokscale-client run`，等待首次采集，日志中应出现 `cloud sync push complete`。
-4. 打开控制台 URL，确认能看到设备及用量。没有可识别的本地会话时，用量可以为空。
-
-采集器连接的是 **API Worker URL**；浏览器访问的是 **Console Worker URL**。
-
-### 8. 开启 Cloudflare 原生自动构建
-
-首次部署完成后，分别进入 Cloudflare 控制台中的两个 Worker，打开 **Settings → Builds → Connect**，授权 Cloudflare GitHub App 访问自己的 fork，并连接同一个仓库。后续推送由 [Workers Builds](https://developers.cloudflare.com/workers/ci-cd/builds/) 在 Cloudflare 内完成检查、构建和部署。
-
-按下表配置两个 Worker。若修改过 Worker 名称，控制台名称必须与对应 `wrangler.jsonc` 中的 `name` 一致；控制台 Worker 的 Service Binding 也需指向自己的 API Worker。
-
-| 设置 | API Worker | Console Worker |
+| 配置项 | API Worker | Console Worker |
 | --- | --- | --- |
-| 生产分支 | `main` | `main` |
-| Root directory | `worker/api` | `worker/console` |
+| Worker 名称 | `tokscale-serverless-api` | `tokscale-serverless-console` |
+| Root directory | `/worker/api/` | `/worker/console/` |
 | Build command | `npm --prefix .. ci && npm --prefix .. run check && npm --prefix .. run build:api` | `npm --prefix .. ci && npm --prefix .. run check && npm --prefix .. run build:console` |
 | Deploy command | `npm --prefix .. run deploy:api` | `npm --prefix .. run deploy:console` |
-| Build variable：`NODE_VERSION` | `24` | `24` |
-| Build variable：`SKIP_DEPENDENCY_INSTALL` | `1` | `1` |
-| 非生产分支构建 | 关闭 | 关闭 |
+| Build variables | `NODE_VERSION=24`、`SKIP_DEPENDENCY_INSTALL=1` | 同左 |
 
-每个 Worker 的根目录都包含自己的 Wrangler 配置；共享的 `package.json`、锁文件和测试配置位于上一级 `worker/`，所以命令使用 `npm --prefix ..`。这是本仓库的[多 Worker 构建布局](https://developers.cloudflare.com/workers/ci-cd/builds/advanced-setups/)。`SKIP_DEPENDENCY_INSTALL=1` 关闭平台默认安装，改由构建命令中的 `npm ci` 严格使用锁文件；Node 版本和该变量均在 **Build variables and secrets** 中设置，详见[构建镜像配置](https://developers.cloudflare.com/workers/ci-cd/builds/build-image/)。
+没有单独配置预览资源时，关闭非生产分支构建。保留上述 Worker 名称；如果改名，同时修改对应 Wrangler 的 `name` 和控制台的 `API` Service Binding。
 
-在 Builds 的 API token 设置中，可以选择由 Cloudflare 自动生成并管理的 token。API 的部署命令还会执行远程 D1 迁移，因此其构建 token 需要目标账号的 **D1 → Edit** 权限；可在 Cloudflare 的 **My Profile → API Tokens** 中调整，或选择已有的合适 token。构建鉴权留在 Cloudflare 内，不需要复制到 GitHub。参见[构建 token 配置](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/#api-token)。
+构建 token 可选择 Cloudflare 自动管理的 token 或已有的合适 token。API 的构建 token 除 Worker 部署权限外，还需要 **D1 → Edit**：`deploy:api` 会自动执行数据库迁移。参见 [Workers Builds 配置](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/#api-token)。
 
-`INGEST_TOKEN` 与上述部署 token 用途不同：它用于采集器和 API 之间的认证，应在两个 Worker 的 **Settings → Variables and Secrets** 中设置为相同的运行时 Secret，或使用前面的 `wrangler secret put` 命令。构建过程不需要它，不要把它放进源码、GitHub Actions 或 Build variables。之前已经设置的 Worker Secret 在普通代码部署时会保留。
+连接完成后，推送到 `main` 会自动触发两个 Worker 的检查、构建和部署。
 
-保存后推送一次提交，在两个 Worker 的 Builds 页面查看结果。`check` 依次执行 TypeScript 检查、本地 D1 迁移验证和 Worker 测试；`build:api` / `build:console` 只打包，不发布。全部成功后才执行对应的部署命令；API 会先迁移远程 D1，再部署代码。后续数据库迁移应兼容仍在运行的旧版本代码。两个 Worker 独立构建，不保证先后顺序，跨 Worker 的接口更新也应保持兼容。
+### 3. 设置 token 和域名
 
-### 自定义域名与访问控制
+分别进入**两个 Worker → Settings → Variables and Secrets**，添加名称为 `INGEST_TOKEN` 的 **Secret**，值必须相同，并保存供采集器使用。这是运行时密钥，不是 Build variable，也不是 Cloudflare 部署 token。
 
-使用自定义域名时，域名对应的 zone 需在自己的 Cloudflare 账号中。在控制台中分别进入两个 Worker，选择 **Settings → Domains & Routes → Add → Custom Domain**，将 API 域名绑定到 API Worker，将控制台域名绑定到 Console Worker。已有绑定可直接保留。
+在 **Settings → Domains & Routes → Add → Custom Domain** 中为控制台绑定域名，API 域名按需绑定。控制台需要自定义域名，其 `workers.dev` 和版本预览地址默认关闭；API 可以直接使用 `workers.dev` 地址。域名在 Cloudflare 中管理，无需配置 `CUSTOM_DOMAIN`，也无需写入 Git。
 
-无需配置 `CUSTOM_DOMAIN` 构建变量。个人域名不写入仓库，两份 Wrangler 配置均不声明 `route` 和 `routes`。默认配置同时启用 `workers.dev`；如果只通过自定义域名访问，将对应配置中的 `workers_dev` 设为 `false`。
+### 4. 用 Access 保护控制台
 
-Cloudflare 会为 [Worker Custom Domain](https://developers.cloudflare.com/workers/configuration/routing/custom-domains/) 配置对应路由及证书；若域名已有冲突的 DNS 记录，先处理冲突。
+未启用 Access 时，控制台允许公开读取统计数据。接入设备前：
 
-如需私有面板：
+1. 在 **Zero Trust → Access controls → Applications** 中为**控制台域名**创建 [Self-hosted 应用](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/self-hosted-public-app/)，Path 留空。添加 **Allow** 策略，允许自己的邮箱登录，并选择登录方式，例如 [One-time PIN 邮箱验证码](https://developers.cloudflare.com/cloudflare-one/integrations/identity-providers/one-time-pin/)。
+2. 在 **API Worker → Settings → Variables and Secrets** 中添加运行时**文本变量**：
 
-1. 在 Cloudflare Zero Trust 中为控制台域名创建 [Access 自托管应用](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/self-hosted-public-app/)，配置允许访问的用户。
-2. 获取 Access team domain 和该应用的 AUD，在 API Worker 配置中加入以下 `vars`，使用真实值替换占位内容：
+   | 变量 | 值 |
+   | --- | --- |
+   | `ACCESS_TEAM_DOMAIN` | `https://YOUR_TEAM.cloudflareaccess.com` |
+   | `ACCESS_AUD` | 控制台 Access 应用的 Application Audience（AUD） |
 
-   ```jsonc
-   "vars": {
-     "ACCESS_TEAM_DOMAIN": "https://YOUR_TEAM.cloudflareaccess.com",
-     "ACCESS_AUD": "YOUR_ACCESS_APPLICATION_AUD"
-   }
-   ```
+   API 配置通过 `keep_vars: true` 保留控制台中的变量。若从含占位 `vars` 的旧配置升级，先部署新版配置。
+3. 保持 [`worker/console/wrangler.jsonc`](worker/console/wrangler.jsonc) 中的 `workers_dev: false` 和 `preview_urls: false`，关闭其他控制台入口；从旧版本升级时，也需要部署这项配置。API 继续接受采集器的 bearer token，不要为采集接口要求浏览器登录。
+4. 用未登录的浏览器确认会进入 Access 登录页，登录后统计数据正常加载。API 的 `/health` 应返回 `200`；`/api/summary` 不带 token 返回 `401`，携带采集器 token 返回 `200`。
 
-3. 控制台使用自定义域名后，将其 `workers_dev` 设为 `false`，并设置 `preview_urls: false`，避免其他公开入口绕过控制台域名上的 Access 策略；重新部署两个 Worker。
-4. 使用未登录的浏览器验证访问需要认证。API 保留 bearer token 认证，采集器继续通过 API 地址同步；只配置 API 的 `vars` 本身不会为控制台建立访问策略。
-
-采集器目前使用 bearer token，不提供浏览器登录流程；不要将仅允许交互式登录的 Access 策略直接套在采集入口上。
-
-### 后续更新
-
-已开启 Workers Builds 时，将更改推送到连接仓库的 `main`，由 Cloudflare 自动更新两个 Worker。若仍使用手动部署，在 `worker/` 目录执行：
-
-```bash
-npm ci
-npm run check
-npm run deploy:api
-npm run deploy:console
-```
-
-普通代码更新无需重新设置 token。更换 token 时，两个 Worker 和每台采集器都需要更新；采集器可重新执行 `connect`。
+随后按[快速开始](#快速开始连接采集器)，用 **API 地址**和 `INGEST_TOKEN` 连接每台主机。后续推送会自动部署并保留运行时密钥；更换 `INGEST_TOKEN` 时，更新两个 Worker 和所有采集器。
 
 ## 采集器配置
 
