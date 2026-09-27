@@ -18,7 +18,6 @@ interface Props {
 	query: string;
 	initialTotal: number;
 	refreshKey: number;
-	onSelectDate: (date: string) => void;
 }
 
 const exact = (value: number) => Math.round(value).toLocaleString("en-US");
@@ -56,11 +55,6 @@ function DailyCard(props: Props) {
 				<h2 id="daily-label">{props.date === props.today ? "今日 token 用量" : "当日 token 用量"}</h2>
 				<div className="daily-number" id="daily-total">{exact(data?.totalTokens ?? props.initialTotal)}<span> tokens</span></div>
 				<p className="daily-scope">{props.date} · {props.scope}</p>
-			</div>
-			<div className="daily-controls">
-				<label className="sr-only" htmlFor="selected-date">查看日期</label>
-				<input id="selected-date" type="date" value={props.date} max={props.today} onChange={event => props.onSelectDate(event.target.value)} />
-				<button className="text-btn" id="back-today" type="button" disabled={props.date === props.today} onClick={() => props.onSelectDate(props.today)}>今天</button>
 			</div>
 		</div>
 		<div className="hourly-chart" id="hourly-chart" aria-label={`${props.date} 每小时 token 用量`}>

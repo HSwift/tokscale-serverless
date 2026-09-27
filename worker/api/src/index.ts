@@ -15,8 +15,7 @@ import {
 	type AuthActor,
 	type Env,
 } from "./auth";
-import { issueInstall, redeemInstall, releases } from "./install";
-import { rememberApiOrigin } from "./endpoint";
+import { installerScript, releases } from "./install";
 
 interface TsTokenBreakdown {
 	input?: number;
@@ -236,11 +235,6 @@ async function ingest(request: Request, env: Env): Promise<Response> {
 				.bind(device.id, row.date, row.hour, row.client, row.modelId, row.tokens));
 		}
 	}
-
-	// The actual collector request supplies the public API origin; console
-	// service-binding requests never pass through this bearer-only route.
-	const origin = rememberApiOrigin(request, env);
-	if (origin) stmts.push(origin);
 
 	// Bound batch size for full-history resends.
 	for (let i = 0; i < stmts.length; i += 100) {
@@ -465,8 +459,8 @@ export default {
 		if (url.pathname === "/health") {
 			return json({ status: "ok" });
 		}
-		if (url.pathname.startsWith("/install/") && request.method === "GET") {
-			return redeemInstall(url.pathname.slice("/install/".length), env);
+		if ((url.pathname === "/install.sh" || url.pathname === "/install.ps1") && request.method === "GET") {
+			return installerScript(url);
 		}
 		if (!url.pathname.startsWith("/api/")) {
 			return error(404, "not_found", "unknown route");
@@ -478,9 +472,6 @@ export default {
 		}
 		const auth = await authenticateRead(request, env);
 		if ("failure" in auth) return auth.failure;
-		if (url.pathname === "/api/install-tickets" && request.method === "POST") {
-			return issueInstall(request, env);
-		}
 		if (request.method !== "GET") {
 			return error(405, "method_not_allowed", "unsupported method");
 		}

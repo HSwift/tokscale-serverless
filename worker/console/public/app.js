@@ -490,7 +490,7 @@ function renderDay() {
 	const total = currentEntities().filter(entity => state.selected === "all" || entity.key === state.selected)
 		.reduce((sum, entity) => sum + (entity.days.find(day => day.date === state.selectedDate)?.tokens ?? 0), 0);
 	renderDailyCard({ date: state.selectedDate, today: toKey(new Date()), scope: selectedEntity()?.label ?? "全部设备",
-		query: params.toString(), initialTotal: total, refreshKey: ++hourlyRequest, onSelectDate: selectDay });
+		query: params.toString(), initialTotal: total, refreshKey: ++hourlyRequest });
 }
 
 function selectDay(date) {

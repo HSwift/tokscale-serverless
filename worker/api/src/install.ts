@@ -1,5 +1,4 @@
 import type { Env } from "./auth";
-import { readApiOrigin } from "./endpoint";
 
 const REPOSITORY = "HSwift/tokscale-serverless";
 const DOWNLOAD_BASE = `https://github.com/${REPOSITORY}/releases/download/`;
@@ -31,7 +30,7 @@ async function latestRelease() {
 		id: platform.id, label: platform.label, asset: assetName(platform),
 		url: `${DOWNLOAD_BASE}${encodeURIComponent(data.tag_name)}/${assetName(platform)}`,
 	}));
-	return { tag: data.tag_name, platforms, hasChecksums: names.has("SHA256SUMS") };
+	return { tag: data.tag_name, platforms };
 }
 
 function assetName(platform: Platform): string {
@@ -40,68 +39,42 @@ function assetName(platform: Platform): string {
 
 export async function releases(env: Env): Promise<Response> {
 	try {
-		const [release, apiUrl] = await Promise.all([latestRelease(), readApiOrigin(env)]);
-		return response({ ...release, apiUrl, installReady: !!apiUrl && !!env.INGEST_TOKEN && release.hasChecksums });
+		const [release, deployment] = await Promise.all([
+			latestRelease(), env.DB.prepare("SELECT origin FROM api_origin WHERE id = 1").first<{ origin: string }>(),
+		]);
+		const apiUrl = deployment?.origin;
+		return response({ tag: release.tag, platforms: release.platforms.map(platform => ({
+			...platform, command: apiUrl && env.INGEST_TOKEN ? installCommand(platform.id, release.tag, apiUrl, env.INGEST_TOKEN) : null,
+		})) });
 	} catch { return response({ error: { message: "暂时无法读取最新版本，请稍后重试。" } }, 502); }
 }
 
-async function hashTicket(ticket: string): Promise<string> {
-	const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(ticket));
-	return [...new Uint8Array(digest)].map(value => value.toString(16).padStart(2, "0")).join("");
-}
-
-// Caller must authenticate before issuing a ticket. The console never adds
-// its shared bearer token to this endpoint: it forwards an actual Access JWT.
-export async function issueInstall(request: Request, env: Env): Promise<Response> {
-	const origin = await readApiOrigin(env);
-	if (!origin) return response({ error: { message: "等待采集器完成一次同步以识别 API 地址；首次部署请先手动连接一台采集器。" } }, 503);
-	if (!env.INGEST_TOKEN) return response({ error: { message: "安装服务尚未配置，请联系管理员。" } }, 503);
-	let platformId: unknown;
-	try { platformId = (await request.json<{ platform?: unknown }>()).platform; }
-	catch { return response({ error: { message: "请选择操作系统。" } }, 400); }
-	const platform = PLATFORMS.find(item => item.id === platformId);
-	if (!platform) return response({ error: { message: "不支持的操作系统。" } }, 400);
-	let release;
-	try { release = await latestRelease(); }
-	catch { return response({ error: { message: "暂时无法读取最新版本，请稍后重试。" } }, 502); }
-	if (!release.hasChecksums || !release.platforms.some(item => item.id === platform.id)) {
-		return response({ error: { message: "该版本尚未提供此系统的完整安装文件。" } }, 409);
+export function installCommand(platform: string, tag: string, origin: string, token: string): string {
+	const params = new URLSearchParams({ platform, tag });
+	if (platform === "windows") {
+		return `$env:SYNC_URL=${psQuote(origin)}; $env:SYNC_TOKEN=${psQuote(token)}; irm ${psQuote(`${origin}/install.ps1?${params}`)} | iex`;
 	}
-	const ticket = [...crypto.getRandomValues(new Uint8Array(32))].map(value => value.toString(16).padStart(2, "0")).join("");
-	const expiresAt = Date.now() + 10 * 60_000;
-	await env.DB.batch([
-		env.DB.prepare("DELETE FROM install_tickets WHERE expires_at <= ?").bind(Date.now()),
-		env.DB.prepare("INSERT INTO install_tickets (hash, platform, tag, expires_at) VALUES (?, ?, ?, ?)")
-			.bind(await hashTicket(ticket), platform.id, release.tag, expiresAt),
-	]);
-	const url = `${origin}/install/${ticket}`;
-	const command = platform.id === "windows"
-		? `powershell -NoProfile -ExecutionPolicy Bypass -Command "& ([ScriptBlock]::Create((Invoke-WebRequest -UseBasicParsing ${psQuote(url)}).Content))"`
-		: `curl -fsSL ${shellQuote(url)} | bash`;
-	return response({ command, expiresAt, tag: release.tag });
+	return `curl -fsSL ${shellQuote(`${origin}/install.sh?${params}`)} | SYNC_URL=${shellQuote(origin)} SYNC_TOKEN=${shellQuote(token)} bash`;
 }
 
-export async function redeemInstall(ticket: string, env: Env): Promise<Response> {
-	if (!/^[a-f0-9]{64}$/.test(ticket)) return response({ error: { message: "安装链接无效或已过期。" } }, 410);
-	const origin = await readApiOrigin(env);
-	if (!origin || !env.INGEST_TOKEN) return response({ error: { message: "安装服务暂不可用。" } }, 503);
-	const row = await env.DB.prepare("DELETE FROM install_tickets WHERE hash = ? AND expires_at > ? RETURNING platform, tag")
-		.bind(await hashTicket(ticket), Date.now()).first<{ platform: string; tag: string }>();
-	const platform = PLATFORMS.find(item => item.id === row?.platform);
-	if (!row || !platform) return response({ error: { message: "安装链接已使用或已过期，请在控制台重新生成。" } }, 410);
-	return new Response(renderInstaller(platform, row.tag, origin, env.INGEST_TOKEN), {
-		headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "private, no-store",
-			"x-content-type-options": "nosniff", "referrer-policy": "no-referrer" },
-	});
+// Public, reusable script. Credentials come from the command's environment.
+export function installerScript(url: URL): Response {
+	const platform = PLATFORMS.find(item => item.id === url.searchParams.get("platform"));
+	const tag = url.searchParams.get("tag") ?? "";
+	if (!platform || !/^[\w][\w./-]{0,100}$/.test(tag) ||
+		(url.pathname === "/install.ps1") !== (platform.id === "windows")) {
+		return response({ error: { message: "Invalid platform or release tag" } }, 400);
+	}
+	return new Response(renderInstaller(platform, tag), { headers: { "content-type": "text/plain; charset=utf-8" } });
 }
 
 const shellQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 const psQuote = (value: string) => `'${value.replaceAll("'", "''")}'`;
 
-export function renderInstaller(platform: Platform, tag: string, origin: string, token: string): string {
+export function renderInstaller(platform: Platform, tag: string): string {
 	const asset = assetName(platform);
 	const base = `${DOWNLOAD_BASE}${encodeURIComponent(tag)}/`;
-	if (platform.id === "windows") return renderPowerShell(base, asset, origin, token);
+	if (platform.id === "windows") return renderPowerShell(base, asset);
 	const os = platform.id === "linux" ? "Linux" : "Darwin";
 	const arch = platform.id === "macos-arm64" ? "arm64" : "x86_64";
 	return `#!/usr/bin/env bash
@@ -127,7 +100,7 @@ fi
 tar -xzf "$install_tmp/${asset}" -C "$install_tmp" tokscale-client
 chmod 755 "$install_tmp/tokscale-client"
 # The existing collector verifies and persists credentials, preserving device identity.
-SYNC_URL=${shellQuote(origin)} SYNC_TOKEN=${shellQuote(token)} "$install_tmp/tokscale-client" connect
+"$install_tmp/tokscale-client" connect
 mkdir -p "$HOME/.local/bin"
 install -m 755 "$install_tmp/tokscale-client" "$HOME/.local/bin/tokscale-client"
 echo 'Installed and connected. Start collecting with:'
@@ -135,14 +108,12 @@ echo '  "$HOME/.local/bin/tokscale-client" run'
 `;
 }
 
-function renderPowerShell(base: string, asset: string, origin: string, token: string): string {
+function renderPowerShell(base: string, asset: string): string {
 	return `# Tokscale collector installer
 $ErrorActionPreference = 'Stop'
 if ([Environment]::OSVersion.Platform -ne 'Win32NT' -or $env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64' -or -not [Environment]::Is64BitOperatingSystem) { throw 'Select the installer for your OS/architecture.' }
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $installTemp = Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString())
-$previousUrl = $env:SYNC_URL
-$previousToken = $env:SYNC_TOKEN
 try {
   New-Item -ItemType Directory -Path $installTemp | Out-Null
   $archive = Join-Path $installTemp ${psQuote(asset)}
@@ -154,8 +125,6 @@ try {
   if (-not $expected -or $expected -notmatch '^[a-fA-F0-9]{64}$' -or (Get-FileHash $archive -Algorithm SHA256).Hash -ne $expected) { throw 'Checksum verification failed.' }
   Expand-Archive -Path $archive -DestinationPath $installTemp
   $binary = Join-Path $installTemp 'tokscale-client.exe'
-  $env:SYNC_URL = ${psQuote(origin)}
-  $env:SYNC_TOKEN = ${psQuote(token)}
   & $binary connect
   if ($LASTEXITCODE -ne 0) { throw 'Connection verification failed.' }
   $destination = Join-Path $env:LOCALAPPDATA 'Programs\\tokscale'
@@ -164,8 +133,6 @@ try {
   Write-Host 'Installed and connected. Start collecting with:'
   Write-Host ('  & "' + (Join-Path $destination 'tokscale-client.exe') + '" run')
 } finally {
-  $env:SYNC_URL = $previousUrl
-  $env:SYNC_TOKEN = $previousToken
   if (Test-Path $installTemp) { Remove-Item $installTemp -Recurse -Force }
 }
 `;

@@ -9,8 +9,8 @@ This project uses Tokscale's `tokscale-core` to parse local session records and 
 ## Features
 
 - **Usage across hosts**: View usage from multiple computers and development servers in one place, with breakdowns by device, client, model, and date.
-- **Daily usage card**: See today's token total and an hourly chart; select a heatmap square or date to inspect another day. Built with React and Recharts, with matching light and dark themes.
-- **Install from the console**: Choose your OS and download the latest published release, or generate a one-time installation command that saves the connection automatically.
+- **Daily usage card**: See today's token total and an hourly chart; select a heatmap square to inspect another day. Built with React and Recharts, with matching light and dark themes.
+- **Install from the console**: Choose your OS and download the latest published release, or copy an installation command that saves the connection automatically.
 - **Automatic collection and synchronization**: Enter the Worker URL and token once. The collector verifies and saves the connection, then uses it on subsequent launches. By default, it scans and synchronizes every 60 seconds.
 - **Self-hosted deployment**: Run the API, database, and console in your own Cloudflare account, with a shared token authenticating device uploads.
 - **Cross-platform collector**: Build targets are available for Linux x86_64, Windows x86_64, macOS Intel, and Apple Silicon.
@@ -36,7 +36,7 @@ flowchart LR
 | Collector | [`client/`](client/) | Rust + Axum; parses local data, serves a local API, and uploads on a schedule |
 | Cloud API | [`worker/api/`](worker/api/) | Authenticates requests, receives uploads, reads and writes D1, and queries aggregated usage |
 | Web console | [`worker/console/`](worker/console/) | Static dashboard, API queries, and Access-authenticated installation commands through a Service Binding |
-| Database migrations | [`worker/api/migrations/`](worker/api/migrations/) | Schemas for devices, daily/hourly usage, credits, and temporary installation tickets |
+| Database migrations | [`worker/api/migrations/`](worker/api/migrations/) | Schemas for devices, daily/hourly usage, credits, and the deployed API address |
 
 The console uses **Workers Static Assets**. It and the API are separate Workers; no separate Cloudflare Pages project is required.
 
@@ -56,9 +56,9 @@ Deploy the backend as described below and have your **API Worker URL** and `INGE
 
 ### Download the collector
 
-In the console, open **Install collector**, choose your OS/architecture, and download the latest published GitHub Release. Drafts and prereleases are excluded. Alternatively, choose **Generate installation command** and run it on the target host: Bash on Linux/macOS, PowerShell on Windows. The command expires after 10 minutes and works once; regenerate it if installation is interrupted.
+Click the **download icon beside the theme toggle** to open the installation dialog. Choose your OS/architecture, then download the latest published GitHub Release or copy the installation command: Bash on Linux/macOS, PowerShell on Windows. The command includes the API URL and `INGEST_TOKEN` directly and can be reused.
 
-The installer verifies `SHA256SUMS`, uses `connect` to validate and save the API URL and token, and installs under `~/.local/bin` (Linux/macOS) or `%LOCALAPPDATA%\Programs\tokscale` (Windows). Existing device identity is preserved. Follow the printed `run` command to start collection; service registration remains a separate step. Automatic configuration requires an Access login and at least one successful collector sync. On a new deployment, connect the first collector manually as described below.
+The installer verifies `SHA256SUMS`, uses `connect` to save the connection, and installs under `~/.local/bin` (Linux/macOS) or `%LOCALAPPDATA%\Programs\tokscale` (Windows). Existing device identity is preserved. Follow the printed `run` command to start collection; service registration remains a separate step.
 
 You can also download directly from [GitHub Releases](https://github.com/HSwift/tokscale-serverless/releases/latest) and connect manually below. If no release is available yet, download an artifact from a successful GitHub Actions build.
 
@@ -132,7 +132,7 @@ In **each Worker → Settings → Variables and Secrets**, add the same **Secret
 
 In **Settings → Domains & Routes → Add → Custom Domain**, bind a domain to the console and optionally another to the API. The console requires a custom domain; its `workers.dev` and version URLs are disabled by default. The API can use its `workers.dev` URL. Domains are managed in Cloudflare; no `CUSTOM_DOMAIN` variable or domain in Git is needed.
 
-The API automatically learns its public HTTPS address from successful, authenticated collector uploads and supplies it through `/api/releases` for installation. No extra URL variable is needed. For an existing deployment, wait for the next collector sync after upgrading; for a new deployment, connect the first collector manually. Console proxy requests cannot change this address.
+`deploy:api` automatically records the API's `workers.dev` address from Wrangler's deployment output. Installation works immediately after deployment, including for the first collector; no additional URL variable or prior upload is needed.
 
 ### 4. Protect the console with Access
 

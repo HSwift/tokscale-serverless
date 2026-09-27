@@ -14,23 +14,6 @@ function makeEnv(apiFetch: (req: Request) => Response): ConsoleEnv {
 }
 
 describe("console router", () => {
-	it("never injects credentials into installer requests and requires a same-origin Access session", async () => {
-		let forwarded = 0;
-		const env = makeEnv(req => {
-			forwarded++;
-			expect(req.headers.get("authorization")).toBeNull();
-			expect(req.headers.get("cf-access-jwt-assertion")).toBe("assertion");
-			return new Response("{}");
-		});
-		for (const headers of [{}, { origin: "https://evil.example", "cf-access-jwt-assertion": "assertion" }]) {
-			const response = await routeConsoleRequest(new Request("https://console.example/api/install-tickets", { method: "POST", headers }), env);
-			expect(response.status).toBe(403);
-		}
-		expect(forwarded).toBe(0);
-		const response = await routeConsoleRequest(new Request("https://console.example/api/install-tickets", { method: "POST", headers: { origin: "https://console.example", "cf-access-jwt-assertion": "assertion", authorization: "Bearer ignored" } }), env);
-		expect(response.status).toBe(200);
-		expect(forwarded).toBe(1);
-	});
 	it("serves assets for non-api paths", async () => {
 		const res = await routeConsoleRequest(
 			new Request("https://console.example/"),
