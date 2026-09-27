@@ -1,6 +1,8 @@
 use crate::device::DeviceInfo;
 use crate::error::AppError;
-use crate::export::{to_ts_daily, TsDateRange, TsExport, TsExportMeta, TsTokenBreakdown};
+use crate::export::{
+    aggregate_hourly, to_ts_daily, TsDateRange, TsExport, TsExportMeta, TsTokenBreakdown,
+};
 use crate::qoder::{QoderCredit, QODER_CLIENT};
 use crate::scan::{self, RefreshOutcome};
 use crate::state::{AppState, Snapshot};
@@ -120,7 +122,9 @@ pub fn export_payload(
     device: &DeviceInfo,
     query: &FilterQuery,
 ) -> Result<serde_json::Value, AppError> {
-    let daily = aggregate_by_date(filter_messages(&snap.messages, query)?);
+    let messages = filter_messages(&snap.messages, query)?;
+    let hourly = aggregate_hourly(&messages);
+    let daily = aggregate_by_date(messages);
     let summary = calculate_summary(&daily);
     let credits = credits_by_date(&snap.credits, query);
     let contributions: Vec<_> = daily
@@ -143,6 +147,7 @@ pub fn export_payload(
         device: device.clone(),
         summary,
         contributions,
+        hourly,
     }))
 }
 

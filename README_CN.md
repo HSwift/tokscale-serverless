@@ -7,6 +7,8 @@
 ## 功能
 
 - **跨主机统计**：集中查看多台电脑、开发服务器上的用量，按设备、客户端、模型和日期分析。
+- **当日用量卡片**：显示今日 token 总数与小时曲线，点击热力图方块或选择日期可查看其他天。使用 React 和 Recharts，与现有深浅主题保持一致。
+- **网页安装入口**：选择系统后下载最新正式版本，或生成一次性安装命令，自动保存连接配置。
 - **自动采集与同步**：首次输入 Worker 地址和 token，验证后保存；后续启动自动读取配置，默认每 60 秒扫描并同步。
 - **可自行部署**：API、数据库和控制台运行在自己的 Cloudflare 账号下，通过共享 token 接收设备上报。
 - **多平台采集器**：提供 Linux x86_64、Windows x86_64、macOS Intel 和 Apple Silicon 构建目标。
@@ -31,14 +33,16 @@ flowchart LR
 | --- | --- | --- |
 | 采集器 | [`client/`](client/) | Rust + Axum，解析本地数据、提供本地 API、定时上报 |
 | 云端 API | [`worker/api/`](worker/api/) | 验证身份、接收上报、读写 D1、查询汇总结果 |
-| 网页控制台 | [`worker/console/`](worker/console/) | 静态页面与只读代理，通过 Service Binding 查询 API |
-| 数据库迁移 | [`worker/api/migrations/`](worker/api/migrations/) | 设备、每日用量和 credits 的表结构 |
+| 网页控制台 | [`worker/console/`](worker/console/) | 静态统计页面，通过 Service Binding 查询 API，并为 Access 登录用户生成安装命令 |
+| 数据库迁移 | [`worker/api/migrations/`](worker/api/migrations/) | 设备、每日/小时用量、credits 和临时安装凭证的表结构 |
 
 控制台通过 **Workers Static Assets** 部署，与 API 是两个独立 Worker，无需另外创建 Cloudflare Pages 项目。
 
 ### 数据与同步方式
 
 采集器启动后立即扫描一次，之后按配置间隔重新扫描，并向 `/api/ingest` 上传聚合结果。云端按「设备、日期、客户端、模型」更新统计行，同一设备重复上报不会重复累加。同步失败会记录日志，本地查询仍可使用，下次扫描后再次尝试同步。
+
+小时汇总在上述维度上增加「小时（0–23）」，包含输入、输出、缓存读写和推理五类 token。日期与小时沿用各采集主机的本地时区，与热力图一致；不同时区的主机不会被转换到统一时区。旧采集器仍可上报每日总量，升级并同步后可从保留的本地记录补齐小时数据；没有有效时间戳的记录仅计入每日总量。
 
 上传内容包括 token、费用、消息数量、Qoder credits 等汇总指标，以及设备 ID、名称、主机名、操作系统和架构；不上传原始对话正文。共享 token 通过认证请求头发送，不进入统计数据正文。
 
@@ -50,7 +54,11 @@ flowchart LR
 
 ### 获取程序
 
-从本仓库的 GitHub Releases 下载对应平台的程序；尚未发布版本时，可以在成功的 GitHub Actions 构建中下载 artifact。
+在控制台点击「安装采集器」，选择系统和架构后下载最新正式 Release，不包含草稿和预发布版本。也可点击「生成一键安装命令」，在目标主机执行：Linux/macOS 使用 Bash，Windows 使用 PowerShell。命令 10 分钟内有效且仅可使用一次，安装中断时重新生成即可。
+
+安装脚本校验 `SHA256SUMS`，通过 `connect` 验证并保存 API 地址和 token，保留已有设备身份。程序安装到 Linux/macOS 的 `~/.local/bin` 或 Windows 的 `%LOCALAPPDATA%\Programs\tokscale`，按终端打印的 `run` 命令开始采集；后台服务另行注册。自动配置需要通过 Access 登录，并已有采集器成功同步过。全新部署时，先按下文手动连接第一台采集器。
+
+也可从 [GitHub Releases](https://github.com/HSwift/tokscale-serverless/releases/latest) 下载后按下文手动连接；尚未发布版本时，可以在成功的 GitHub Actions 构建中下载 artifact。
 
 | 平台 | 压缩包 |
 | --- | --- |
@@ -121,6 +129,8 @@ Fork 本仓库。在 Cloudflare 中创建名为 `tokscale-serverless` 的 D1 数
 分别进入**两个 Worker → Settings → Variables and Secrets**，添加名称为 `INGEST_TOKEN` 的 **Secret**，值必须相同，并保存供采集器使用。这是运行时密钥，不是 Build variable，也不是 Cloudflare 部署 token。
 
 在 **Settings → Domains & Routes → Add → Custom Domain** 中为控制台绑定域名，API 域名按需绑定。控制台需要自定义域名，其 `workers.dev` 和版本预览地址默认关闭；API 可以直接使用 `workers.dev` 地址。域名在 Cloudflare 中管理，无需配置 `CUSTOM_DOMAIN`，也无需写入 Git。
+
+API 从验证通过的采集上报中自动识别公网 HTTPS 地址，并通过 `/api/releases` 提供给安装功能，无需额外配置地址变量。已有部署升级后等待采集器再次同步；全新部署先手动连接第一台采集器。控制台代理请求不会改写这个地址。
 
 ### 4. 用 Access 保护控制台
 

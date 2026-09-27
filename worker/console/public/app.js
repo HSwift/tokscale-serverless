@@ -1,3 +1,6 @@
+import { initInstaller } from "./installer.js";
+import { renderDailyCard } from "./assets/daily-card.js";
+
 const DAY_MS = 86_400_000;
 const RANGE_DAYS = { week: 7, month: 30, year: 371 };
 
@@ -21,6 +24,7 @@ const state = {
 	view: "2d",
 	series: { devices: null, models: null, clients: null },
 	window: null,
+	selectedDate: toKey(new Date()),
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -60,8 +64,8 @@ function intensity(tokens, max) {
 	return 1;
 }
 
-async function fetchJSON(path) {
-	const res = await fetch(path);
+async function fetchJSON(path, options) {
+	const res = await fetch(path, options);
 	if (!res.ok) {
 		let detail = `HTTP ${res.status}`;
 		try {
@@ -186,12 +190,15 @@ function renderGrid(calendar) {
 		el.dataset.level = String(cell.level);
 		if (cell.future) {
 			el.classList.add("future");
+			el.disabled = true;
 			el.tabIndex = -1;
 		} else {
 			el.classList.add("live");
 			el.dataset.date = cell.date;
 			el.dataset.tokens = String(cell.tokens);
-			el.tabIndex = -1;
+			el.tabIndex = 0;
+			el.classList.toggle("selected-day", cell.date === state.selectedDate);
+			el.setAttribute("aria-pressed", String(cell.date === state.selectedDate));
 			el.setAttribute("aria-label", `${cell.date}: ${fmtExact(cell.tokens)} tokens`);
 		}
 		if (!reduceMotion) {
@@ -244,6 +251,11 @@ function renderIso(calendar) {
 		g.classList.add("live");
 		g.dataset.date = cell.date;
 		g.dataset.tokens = String(cell.tokens);
+		g.classList.toggle("selected-day", cell.date === state.selectedDate);
+		g.setAttribute("role", "button");
+		g.setAttribute("tabindex", "0");
+		g.setAttribute("aria-label", `${cell.date}: ${fmtExact(cell.tokens)} tokens`);
+		g.setAttribute("aria-pressed", String(cell.date === state.selectedDate));
 		for (const [points, fill, face] of faces) {
 			const poly = document.createElementNS(ns, "polygon");
 			poly.setAttribute("points", points);
@@ -328,6 +340,7 @@ function renderStats() {
 	const active = [...daysMap.values()].filter((t) => t > 0).length;
 	const elapsed = Math.round((state.window.end - state.window.start) / DAY_MS) + 1;
 	const items = [
+		["今日", fmtCompact(daysMap.get(toKey(new Date())) ?? 0), fmtExact(daysMap.get(toKey(new Date())) ?? 0), true],
 		["总 tokens", fmtCompact(total), fmtExact(total), true],
 		["活跃天数", String(active), `${active} / ${elapsed}`, false],
 		["日均", fmtCompact(total / Math.max(1, elapsed)), fmtExact(total / Math.max(1, elapsed)), false],
@@ -467,6 +480,29 @@ function renderAll() {
 	renderChips();
 	renderHeatmap();
 	renderBars();
+	void renderDay();
+}
+
+let hourlyRequest = 0;
+function renderDay() {
+	const params = new URLSearchParams({ date: state.selectedDate });
+	if (state.selected !== "all") params.set({ devices: "deviceId", models: "modelId", clients: "client" }[state.group], state.selected);
+	const total = currentEntities().filter(entity => state.selected === "all" || entity.key === state.selected)
+		.reduce((sum, entity) => sum + (entity.days.find(day => day.date === state.selectedDate)?.tokens ?? 0), 0);
+	renderDailyCard({ date: state.selectedDate, today: toKey(new Date()), scope: selectedEntity()?.label ?? "全部设备",
+		query: params.toString(), initialTotal: total, refreshKey: ++hourlyRequest, onSelectDate: selectDay });
+}
+
+function selectDay(date) {
+	if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || date > toKey(new Date())) return;
+	state.selectedDate = date;
+	for (const cell of document.querySelectorAll(".live[data-date]")) {
+		const selected = cell.dataset.date === date;
+		cell.classList.toggle("selected-day", selected);
+		cell.setAttribute("aria-pressed", String(selected));
+	}
+	hideTooltip();
+	void renderDay();
 }
 
 /* ── events ──────────────────────────────────────────── */
@@ -480,6 +516,18 @@ function activateSeg(seg, btn) {
 }
 
 function bindControls() {
+	for (const container of [$("#grid"), $("#iso")]) {
+		container.addEventListener("click", event => {
+			const cell = event.target.closest?.("[data-date]");
+			if (cell) selectDay(cell.dataset.date);
+		});
+	}
+	$("#iso").addEventListener("keydown", event => {
+		if (event.key === "Enter" || event.key === " ") {
+			const cell = event.target.closest?.("[data-date]");
+			if (cell) { event.preventDefault(); selectDay(cell.dataset.date); }
+		}
+	});
 	$("#theme-toggle").addEventListener("click", () => {
 		const root = document.documentElement;
 		const next = root.dataset.theme === "light" ? "dark" : "light";
@@ -494,6 +542,7 @@ function bindControls() {
 		if (!btn || btn.dataset.range === state.range) return;
 		state.range = btn.dataset.range;
 		state.window = windowFor(state.range);
+		if (parseKey(state.selectedDate) < state.window.start) state.selectedDate = toKey(new Date());
 		activateSeg($("#range-seg"), btn);
 		hideTooltip();
 		renderAll();
@@ -508,6 +557,7 @@ function bindControls() {
 		hideTooltip();
 		renderChips();
 		renderHeatmap();
+		void renderDay();
 	});
 
 	$("#chips").addEventListener("click", (ev) => {
@@ -521,6 +571,7 @@ function bindControls() {
 		}
 		hideTooltip();
 		renderHeatmap();
+		void renderDay();
 	});
 
 	$("#view-seg").addEventListener("click", (ev) => {
@@ -539,6 +590,7 @@ function bindControls() {
 
 async function boot() {
 	bindControls();
+	initInstaller();
 	bindTooltip($("#grid"));
 	bindTooltip($("#iso"));
 	try {

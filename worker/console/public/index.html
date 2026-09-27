@@ -23,6 +23,7 @@
 			<span class="brand-name">tokscale</span>
 		</div>
 		<div class="topside">
+			<a class="install-link" href="#install">安装采集器 ↗</a>
 			<dl class="stats" id="stats" aria-live="polite"></dl>
 			<button id="theme-toggle" class="icon-btn" type="button" aria-label="切换深浅主题" title="切换深浅主题">
 				<svg class="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
@@ -82,6 +83,8 @@
 		</div>
 	</section>
 
+	<section class="panel daily-panel" aria-label="所选日期的小时 token 用量" id="daily-panel"></section>
+
 	<section class="bars" aria-label="用量构成">
 		<div class="bar-panel" id="bar-clients">
 			<h2>按 agent <span class="bar-total"></span></h2>
@@ -98,6 +101,25 @@
 			<div class="share-bar" role="img"></div>
 			<ul class="bar-legend"></ul>
 		</div>
+	</section>
+
+	<section class="panel install-panel" id="install" aria-label="下载并安装采集器">
+		<div class="install-head">
+			<div><h2>连接更多设备</h2><p>下载采集器，将这台电脑的用量同步到这里。</p></div>
+			<a id="release-link" href="https://github.com/HSwift/tokscale-serverless/releases/latest" target="_blank" rel="noopener noreferrer">查看最新版本 ↗</a>
+		</div>
+		<div class="install-actions">
+			<label class="sr-only" for="install-platform">选择操作系统</label>
+			<select id="install-platform" disabled><option>正在读取版本…</option></select>
+			<a id="download-link" class="text-btn disabled" aria-disabled="true">下载安装包 ↓</a>
+			<button id="install-generate" class="primary-btn" type="button" disabled>生成一键安装命令</button>
+			<button id="install-retry" class="text-btn hidden" type="button">重试</button>
+		</div>
+		<div class="install-command hidden" id="install-command-box">
+			<div class="command-head"><span id="command-label">在目标电脑的终端执行</span><button class="text-btn" type="button" id="copy-install">复制命令</button></div>
+			<pre><code id="install-command"></code></pre>
+		</div>
+		<p class="chart-note" id="install-status" role="status">正在读取最新正式版本…</p>
 	</section>
 
 	<footer class="page-foot" id="page-foot"></footer>

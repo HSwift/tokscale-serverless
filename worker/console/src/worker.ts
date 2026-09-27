@@ -1,5 +1,5 @@
 /**
- * tokscale-serverless-console: static stats page + read-only API proxy.
+ * tokscale-serverless-console: static stats page + API proxy.
  *
  * Assets serve the page; GET/HEAD /api/* (never /api/ingest) is forwarded to
  * the api worker over a service binding. Until Cloudflare Access fronts this
@@ -7,6 +7,8 @@
  * bearer token server-side for those read-only calls. Once Access is on, each
  * request arrives with Cf-Access-Jwt-Assertion, which is forwarded untouched —
  * the api worker verifies the JWT itself and no injection happens.
+ * Issuing installation tickets additionally requires Access and a same-origin
+ * POST; that endpoint never uses the console's fallback bearer credential.
  */
 
 export type RequestForwarder = {
@@ -31,6 +33,20 @@ export function routeConsoleRequest(
 	env: ConsoleEnv,
 ): Response | Promise<Response> {
 	const pathname = new URL(request.url).pathname;
+	if (pathname === "/api/install-tickets") {
+		// This endpoint distributes machine credentials. Never inject the
+		// console's token: API authentication must validate the user's JWT.
+		if (request.method !== "POST") return notFound();
+		const origin = request.headers.get("origin");
+		if (origin !== new URL(request.url).origin || !request.headers.has("cf-access-jwt-assertion")) {
+			return new Response(JSON.stringify({ error: { message: "请先通过 Access 登录后生成安装命令。" } }), {
+				status: 403, headers: { "content-type": "application/json", "cache-control": "no-store" },
+			});
+		}
+		const forwarded = new Request(request);
+		forwarded.headers.delete("authorization");
+		return env.API.fetch(forwarded);
+	}
 	if (pathname === "/api" || pathname.startsWith("/api/")) {
 		const readOnly = request.method === "GET" || request.method === "HEAD";
 		if (!readOnly || pathname === "/api/ingest") {

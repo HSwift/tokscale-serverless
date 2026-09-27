@@ -1,6 +1,8 @@
 import { env, SELF } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import schema from "../migrations/0001_init.sql?raw";
+import hourlySchema from "../migrations/0002_hourly_and_install.sql?raw";
+import originSchema from "../migrations/0003_api_origin.sql?raw";
 
 const AUTH = { Authorization: "Bearer test-token" };
 
@@ -50,7 +52,7 @@ const EXPORT_PAYLOAD = {
 beforeAll(async () => {
 	// workerd's D1 exec is line-oriented: feed one statement per exec call,
 	// collapsed to a single line, comments stripped.
-	const body = schema
+	const body = (schema + "\n" + hourlySchema + "\n" + originSchema)
 		.split("\n")
 		.filter((line) => !line.trimStart().startsWith("--"))
 		.join("\n");
@@ -219,5 +221,53 @@ describe("tokscale-serverless worker", () => {
 			(await SELF.fetch("https://example.com/api/summary?since=2026-13-99", { headers: AUTH }))
 				.status,
 		).toBe(400);
+	});
+});
+
+describe("hourly usage", () => {
+	it("keeps resends idempotent, fills 24 hours, and filters device/model", async () => {
+		const payload = {
+			device: { id: "dev_hourly" },
+			contributions: [{ date: "2026-09-28", clients: [
+				{ client: "codex", modelId: "model-a", tokens: { input: 130 } },
+				{ client: "claude", modelId: "model-b", tokens: { output: 20 } },
+			] }],
+			hourly: [
+				{ date: "2026-09-28", hour: 0, client: "codex", modelId: "model-a", tokens: 100 },
+				{ date: "2026-09-28", hour: 23, client: "codex", modelId: "model-a", tokens: 30 },
+				{ date: "2026-09-28", hour: 23, client: "claude", modelId: "model-b", tokens: 20 },
+			],
+		};
+		for (let i = 0; i < 2; i++) expect((await postIngest(payload)).status).toBe(200);
+		const result = await (await SELF.fetch("https://example.com/api/hourly?date=2026-09-28&deviceId=dev_hourly", { headers: AUTH })).json();
+		expect(result.totalTokens).toBe(150);
+		expect(result.hourlyTokens).toBe(150);
+		expect(result.complete).toBe(true);
+		expect(result.hours).toHaveLength(24);
+		expect(result.hours[0].tokens).toBe(100);
+		expect(result.hours[1].tokens).toBe(0);
+		expect(result.hours[23].tokens).toBe(50);
+		const filtered = await (await SELF.fetch("https://example.com/api/hourly?date=2026-09-28&deviceId=dev_hourly&modelId=model-b", { headers: AUTH })).json();
+		expect(filtered.totalTokens).toBe(20);
+		expect(filtered.hourlyTokens).toBe(20);
+		expect(filtered.hours[23].tokens).toBe(20);
+		const bad = structuredClone(payload);
+		bad.hourly[0].hour = 24;
+		bad.contributions[0].clients[0].tokens.input = 999;
+		expect((await postIngest(bad)).status).toBe(400);
+		const unchanged = await (await SELF.fetch("https://example.com/api/hourly?date=2026-09-28&deviceId=dev_hourly", { headers: AUTH })).json();
+		expect(unchanged.totalTokens).toBe(150);
+	});
+
+	it("distinguishes legacy daily-only data from an empty day", async () => {
+		await postIngest({ device: { id: "dev_legacy_hourly" }, contributions: [
+			{ date: "2026-09-27", clients: [{ client: "codex", modelId: "legacy", tokens: { input: 40 } }] },
+		] });
+		const legacy = await (await SELF.fetch("https://example.com/api/hourly?date=2026-09-27&deviceId=dev_legacy_hourly", { headers: AUTH })).json();
+		expect(legacy).toMatchObject({ totalTokens: 40, hasHourlyData: false, complete: false });
+		const empty = await (await SELF.fetch("https://example.com/api/hourly?date=2026-09-26&deviceId=dev_legacy_hourly", { headers: AUTH })).json();
+		expect(empty).toMatchObject({ totalTokens: 0, hasHourlyData: false, complete: true });
+		expect((await SELF.fetch("https://example.com/api/hourly?date=2026-02-30", { headers: AUTH })).status).toBe(400);
+		expect((await SELF.fetch("https://example.com/api/hourly?date=2026-09-28")).status).toBe(401);
 	});
 });

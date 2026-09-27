@@ -15,6 +15,8 @@ import {
 	type AuthActor,
 	type Env,
 } from "./auth";
+import { issueInstall, redeemInstall, releases } from "./install";
+import { rememberApiOrigin } from "./endpoint";
 
 interface TsTokenBreakdown {
 	input?: number;
@@ -58,6 +60,7 @@ interface TsDevice {
 interface TsExport {
 	device?: TsDevice;
 	contributions?: TsDailyContribution[];
+	hourly?: { date: string; hour: number; client: string; modelId: string; tokens: number }[];
 }
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -217,8 +220,29 @@ async function ingest(request: Request, env: Env): Promise<Response> {
 		}
 	}
 
-	// D1 batches cap at ~10k bound parameters; a full-history resend stays
-	// far below that, but chunk defensively.
+	if (body.hourly !== undefined) {
+		if (!Array.isArray(body.hourly)) return error(400, "bad_request", "hourly must be an array");
+		for (const row of body.hourly) {
+			if (!row || typeof row.date !== "string" || !isValidDate(row.date) ||
+				!Number.isInteger(row.hour) || row.hour < 0 || row.hour > 23 ||
+				typeof row.client !== "string" || !row.client || typeof row.modelId !== "string" || !row.modelId ||
+				!Number.isSafeInteger(row.tokens) || row.tokens < 0) {
+				return error(400, "bad_request", "invalid hourly contribution");
+			}
+			stmts.push(env.DB.prepare(`INSERT INTO hourly_rows
+				(device_id, date, hour, client, model_id, tokens) VALUES (?, ?, ?, ?, ?, ?)
+				ON CONFLICT(device_id, date, hour, client, model_id) DO UPDATE SET
+				tokens = excluded.tokens, updated_at = datetime('now')`)
+				.bind(device.id, row.date, row.hour, row.client, row.modelId, row.tokens));
+		}
+	}
+
+	// The actual collector request supplies the public API origin; console
+	// service-binding requests never pass through this bearer-only route.
+	const origin = rememberApiOrigin(request, env);
+	if (origin) stmts.push(origin);
+
+	// Bound batch size for full-history resends.
 	for (let i = 0; i < stmts.length; i += 100) {
 		await env.DB.batch(stmts.slice(i, i + 100));
 	}
@@ -327,6 +351,28 @@ async function daily(url: URL, env: Env): Promise<Response> {
 	return json({ contributions });
 }
 
+async function hourly(url: URL, env: Env): Promise<Response> {
+	const date = url.searchParams.get("date") ?? "";
+	if (!isValidDate(date)) return error(400, "bad_request", "date must be YYYY-MM-DD");
+	const clauses = ["date = ?"];
+	const binds = [date];
+	for (const [parameter, column] of [["deviceId", "device_id"], ["modelId", "model_id"], ["client", "client"]]) {
+		const value = url.searchParams.get(parameter);
+		if (value) { clauses.push(`${column} = ?`); binds.push(value); }
+	}
+	const where = `WHERE ${clauses.join(" AND ")}`;
+	const [rows, dailyTotal] = await Promise.all([
+		env.DB.prepare(`SELECT hour, SUM(tokens) AS tokens FROM hourly_rows ${where} GROUP BY hour ORDER BY hour`).bind(...binds).all<{ hour: number; tokens: number }>(),
+		env.DB.prepare(`SELECT COALESCE(SUM(input + output + cache_read + cache_write + reasoning), 0) AS tokens FROM daily_rows ${where}`).bind(...binds).first<{ tokens: number }>(),
+	]);
+	const byHour = new Map(rows.results.map(row => [row.hour, row.tokens]));
+	const hourlyTokens = rows.results.reduce((sum, row) => sum + row.tokens, 0);
+	const totalTokens = dailyTotal?.tokens ?? 0;
+	return json({ date, totalTokens, hourlyTokens, hasHourlyData: rows.results.length > 0,
+		complete: hourlyTokens === totalTokens, timezone: "collector-local",
+		hours: Array.from({ length: 24 }, (_, hour) => ({ hour, tokens: byHour.get(hour) ?? 0 })) });
+}
+
 async function models(url: URL, env: Env): Promise<Response> {
 	const f = filters(url);
 	if (f instanceof Response) return f;
@@ -419,6 +465,9 @@ export default {
 		if (url.pathname === "/health") {
 			return json({ status: "ok" });
 		}
+		if (url.pathname.startsWith("/install/") && request.method === "GET") {
+			return redeemInstall(url.pathname.slice("/install/".length), env);
+		}
 		if (!url.pathname.startsWith("/api/")) {
 			return error(404, "not_found", "unknown route");
 		}
@@ -429,16 +478,23 @@ export default {
 		}
 		const auth = await authenticateRead(request, env);
 		if ("failure" in auth) return auth.failure;
+		if (url.pathname === "/api/install-tickets" && request.method === "POST") {
+			return issueInstall(request, env);
+		}
 		if (request.method !== "GET") {
 			return error(405, "method_not_allowed", "unsupported method");
 		}
 		switch (url.pathname) {
+			case "/api/releases":
+				return releases(env);
 			case "/api/me":
 				return json({ actor: auth.actor });
 			case "/api/summary":
 				return summary(url, env);
 			case "/api/daily":
 				return daily(url, env);
+			case "/api/hourly":
+				return hourly(url, env);
 			case "/api/models":
 				return models(url, env);
 			case "/api/series":

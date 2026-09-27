@@ -36,6 +36,7 @@
 }
 
 :root[data-theme="light"] {
+	color-scheme: light;
 	--canvas: #ffffff;
 	--surface: #ffffff;
 	--surface-muted: #f6f8fa;
@@ -66,6 +67,43 @@ body {
 	font-size: 15px;
 	line-height: 1.5;
 	-webkit-font-smoothing: antialiased;
+}
+
+/* Daily card and installer share the existing surfaces, spacing and blue ramp. */
+.daily-panel, .install-panel { padding: 20px; min-width: 0; }
+.daily-head, .install-head, .command-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.daily-head h2, .install-head h2 { font-size: 13px; font-weight: 600; margin: 0 0 8px; }
+.daily-number { color: var(--accent-text); font: 600 30px/1.3 var(--mono); font-variant-numeric: tabular-nums; letter-spacing: -.04em; }
+.daily-number span { font: 400 12px var(--sans); letter-spacing: 0; color: var(--muted); }
+.daily-scope, .install-head p { margin: 5px 0 0; color: var(--muted); font-size: 12px; }
+.daily-controls, .install-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.daily-controls input, .install-actions select { background: var(--surface-muted); border: 1px solid var(--border-strong); border-radius: 7px; color: var(--text); padding: 8px 10px; font: inherit; font-size: 12px; max-width: 100%; }
+:root[data-theme="dark"] .daily-controls input { color-scheme: dark; }
+.hourly-chart { height: 230px; width: 100%; margin-top: 20px; font-family: var(--mono); }
+.chart-placeholder { display: grid; place-items: center; height: 100%; margin: 0; color: var(--muted); font: 13px var(--sans); }
+.chart-note { margin: 12px 0 0; color: var(--muted); font-size: 12px; }
+.text-btn, .primary-btn, .install-link { display: inline-flex; align-items: center; justify-content: center; gap: 5px; border-radius: 7px; padding: 8px 12px; font: 500 12px var(--sans); text-decoration: none; cursor: pointer; white-space: nowrap; }
+.text-btn, .install-link { color: var(--muted); background: var(--surface-muted); border: 1px solid var(--border); }
+.text-btn:hover, .install-link:hover { color: var(--text); border-color: var(--border-strong); }
+.primary-btn { border: 1px solid var(--accent); color: var(--accent-text); background: var(--accent-soft); }
+.primary-btn:hover { border-color: var(--accent-hover); }
+.text-btn:disabled, .primary-btn:disabled, .disabled { opacity: .45; pointer-events: none; cursor: default; }
+.install-head > a { color: var(--accent-text); text-decoration: none; font-size: 12px; }
+.install-actions { margin-top: 18px; }
+.install-command { margin-top: 16px; background: var(--surface-muted); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
+.command-head { font-size: 12px; color: var(--muted); }
+.install-command pre { margin: 10px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.8 var(--mono); }
+.cell.selected-day { outline: 2px solid var(--focus); outline-offset: 2px; z-index: 2; }
+#iso .selected-day polygon { stroke: var(--focus); stroke-width: 1.2px; }
+#iso .live { cursor: pointer; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+input:focus-visible, select:focus-visible, .text-btn:focus-visible, .primary-btn:focus-visible, .install-link:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
+@media (max-width: 640px) {
+	.daily-panel, .install-panel { padding: 16px; }
+	.daily-number { font-size: 26px; }
+	.hourly-chart { height: 210px; }
+	.daily-controls { width: 100%; }
+	.install-actions select { width: 100%; }
 }
 
 .page {
