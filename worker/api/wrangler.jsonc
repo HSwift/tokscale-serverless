@@ -7,18 +7,14 @@
 	"name": "tokscale-serverless-api",
 	"main": "./src/index.ts",
 	"compatibility_date": "2026-09-16",
-	// Keep workers.dev enabled as a fallback ingest endpoint alongside the
-	// custom domain.
+	// Use workers.dev by default; custom domains are optional.
 	"workers_dev": true,
 	"observability": {
 		"enabled": true
 	},
 	"upload_source_maps": true,
-	// API custom domain (token-only access; browser/Access traffic is a
-	// separate future console concern).
-	"routes": [
-		{ "pattern": "usage-api.example.com", "custom_domain": true }
-	],
+	// Add your own custom domain here if needed; see README.md.
+	"routes": [],
 	// Access JWT verification (console frontend authenticates via Cloudflare
 	// Access; the API re-verifies the assertion cryptographically). Identifiers,
 	// not secrets. Until real values replace the placeholders, Access auth is
@@ -31,6 +27,7 @@
 		{
 			"binding": "DB",
 			"database_name": "tokscale-serverless",
+			// Replace with the ID returned by `wrangler d1 create` before deployment.
 			"database_id": "YOUR_D1_DATABASE_ID",
 			"migrations_dir": "migrations"
 		}

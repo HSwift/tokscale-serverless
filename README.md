@@ -1,104 +1,106 @@
 # Tokscale Serverless
 
-基于 [Tokscale](https://github.com/junhoyeo/tokscale) 的跨主机 AI 编程工具用量统计与同步服务。
+English | [简体中文](README_CN.md)
 
-本项目复用 Tokscale 的 `tokscale-core`，解析各台主机上的会话记录、统计 token 用量，并在此基础上提供**跨主机数据同步、云端聚合存储和统一的网页统计面板**。服务端部署于 Cloudflare Workers 和 D1，采集器运行在用户自己的 Linux、macOS 或 Windows 主机上。
+Usage tracking and synchronization for AI coding tools across multiple hosts, built on [Tokscale](https://github.com/junhoyeo/tokscale).
 
-## 功能
+This project uses Tokscale's `tokscale-core` to parse local session records and measure token usage, adding **synchronization across hosts, aggregated cloud storage, and a unified web dashboard**. The backend runs on Cloudflare Workers and D1, while the collector runs on your own Linux, macOS, or Windows machines.
 
-- **跨主机统计**：集中查看多台电脑、开发服务器上的用量，按设备、客户端、模型和日期分析。
-- **自动采集与同步**：首次输入 Worker 地址和 token，验证后保存；后续启动自动读取配置，默认每 60 秒扫描并同步。
-- **可自行部署**：API、数据库和控制台运行在自己的 Cloudflare 账号下，通过共享 token 接收设备上报。
-- **多平台采集器**：提供 Linux x86_64、Windows x86_64、macOS Intel 和 Apple Silicon 构建目标。
-- **本地查询与导出**：提供 HTTP API，支持本机统计查询、聚合数据导出和手动刷新。
-- **Qoder 支持**：在上游解析能力之外增加 Qoder 数据源，单独统计 credits，避免与美元费用混合。
+## Features
 
-支持的数据源以当前锁定版本的 `tokscale-core` 为准。部分客户端需要先按上游说明生成本地缓存或导出数据，采集器读取这些已有数据。
+- **Usage across hosts**: View usage from multiple computers and development servers in one place, with breakdowns by device, client, model, and date.
+- **Automatic collection and synchronization**: Enter the Worker URL and token once. The collector verifies and saves the connection, then uses it on subsequent launches. By default, it scans and synchronizes every 60 seconds.
+- **Self-hosted deployment**: Run the API, database, and console in your own Cloudflare account, with a shared token authenticating device uploads.
+- **Cross-platform collector**: Build targets are available for Linux x86_64, Windows x86_64, macOS Intel, and Apple Silicon.
+- **Local queries and exports**: An HTTP API provides local usage queries, aggregated data exports, and manual refreshes.
+- **Qoder support**: An additional Qoder data source extends upstream parsing support. Credits are tracked separately from costs in USD.
 
-## 项目架构
+Supported data sources depend on the pinned version of `tokscale-core`. Some clients require you to generate local caches or exports using the upstream instructions before the collector can read them.
+
+## Architecture
 
 ```mermaid
 flowchart LR
-    A[主机 A · 采集器] -->|HTTPS 同步| API[API Worker]
-    B[主机 B · 采集器] -->|HTTPS 同步| API
-    C[主机 C · 采集器] -->|HTTPS 同步| API
+    A[Host A · Collector] -->|HTTPS sync| API[API Worker]
+    B[Host B · Collector] -->|HTTPS sync| API
+    C[Host C · Collector] -->|HTTPS sync| API
     API --> DB[(Cloudflare D1)]
-    Browser[浏览器] --> Console[Console Worker]
-    Console -->|Service Binding 查询| API
+    Browser[Browser] --> Console[Console Worker]
+    Console -->|Service Binding queries| API
 ```
 
-| 组件 | 目录 | 职责 |
+| Component | Directory | Responsibilities |
 | --- | --- | --- |
-| 采集器 | [`client/`](client/) | Rust + Axum，解析本地数据、提供本地 API、定时上报 |
-| 云端 API | [`worker/api/`](worker/api/) | 验证身份、接收上报、读写 D1、查询汇总结果 |
-| 网页控制台 | [`worker/console/`](worker/console/) | 静态页面与只读代理，通过 Service Binding 查询 API |
-| 数据库迁移 | [`worker/api/migrations/`](worker/api/migrations/) | 设备、每日用量和 credits 的表结构 |
+| Collector | [`client/`](client/) | Rust + Axum; parses local data, serves a local API, and uploads on a schedule |
+| Cloud API | [`worker/api/`](worker/api/) | Authenticates requests, receives uploads, reads and writes D1, and queries aggregated usage |
+| Web console | [`worker/console/`](worker/console/) | Static pages and a read-only proxy that queries the API through a Service Binding |
+| Database migrations | [`worker/api/migrations/`](worker/api/migrations/) | Schemas for devices, daily usage, and credits |
 
-控制台通过 **Workers Static Assets** 部署，与 API 是两个独立 Worker，无需另外创建 Cloudflare Pages 项目。
+The console uses **Workers Static Assets**. It and the API are separate Workers; no separate Cloudflare Pages project is required.
 
-### 数据与同步方式
+### Data and synchronization
 
-采集器启动后立即扫描一次，之后按配置间隔重新扫描，并向 `/api/ingest` 上传聚合结果。云端按「设备、日期、客户端、模型」更新统计行，同一设备重复上报不会重复累加。同步失败会记录日志，本地查询仍可使用，下次扫描后再次尝试同步。
+The collector scans once at startup, then rescans at the configured interval and uploads aggregated results to `/api/ingest`. The backend updates rows by device, date, client, and model, so repeated uploads from the same device do not double-count usage. Synchronization failures are logged; local queries remain available, and synchronization is retried after the next scan.
 
-上传内容包括 token、费用、消息数量、Qoder credits 等汇总指标，以及设备 ID、名称、主机名、操作系统和架构；不上传原始对话正文。共享 token 通过认证请求头发送，不进入统计数据正文。
+Uploads contain summary metrics such as token usage, costs, message counts, and Qoder credits, along with the device ID, name, hostname, operating system, and architecture. Raw conversation text is not uploaded. The shared token is sent in an authentication header, not in the statistics payload.
 
-每台主机应独立完成首次连接，保留各自生成的设备 ID。不要将一台主机的完整 `device.json` 复制到另一台主机，否则两台主机会被视为同一设备。当前同步不会自动删除本次扫描中缺失的云端历史行，也不对不同主机上的同一份会话做全局去重。
+Complete the initial connection separately on each host so that each retains its own generated device ID. Do not copy an entire `device.json` from one host to another, as both hosts would be treated as the same device. Synchronization currently does not delete historical cloud rows that are absent from a later scan, nor does it deduplicate copies of the same session across different hosts.
 
-## 快速开始：连接采集器
+## Quick start: connect a collector
 
-先按下文部署云端，准备好 **API Worker 地址**和 `INGEST_TOKEN`。已有部署时，可直接从这里开始。
+Deploy the backend as described below and have your **API Worker URL** and `INGEST_TOKEN` ready. If you already have a deployment, start here.
 
-### 获取程序
+### Download the collector
 
-从本仓库的 GitHub Releases 下载对应平台的程序；尚未发布版本时，可以在成功的 GitHub Actions 构建中下载 artifact。
+Download the archive for your platform from this repository's GitHub Releases. If no release is available yet, download an artifact from a successful GitHub Actions build.
 
-| 平台 | 压缩包 |
+| Platform | Archive |
 | --- | --- |
 | Linux x86_64 | `tokscale-client-x86_64-unknown-linux-musl.tar.gz` |
 | Windows x86_64 | `tokscale-client-x86_64-pc-windows-msvc.zip` |
 | macOS Apple Silicon | `tokscale-client-aarch64-apple-darwin.tar.gz` |
 | macOS Intel | `tokscale-client-x86_64-apple-darwin.tar.gz` |
 
-Linux 使用 musl 静态链接，Windows 使用静态 MSVC CRT；macOS 最低部署版本设为 11.0。运行预编译采集器无需安装 Rust 或 Node.js。
+Linux builds link statically against musl, and Windows builds use the static MSVC CRT. The minimum macOS deployment target is 11.0. Prebuilt collectors require neither Rust nor Node.js to run.
 
-### 首次连接
+### Initial connection
 
-Linux / macOS：
+Linux / macOS:
 
 ```bash
 ./tokscale-client connect https://your-api.example.com
 ./tokscale-client run
 ```
 
-Windows PowerShell：
+Windows PowerShell:
 
 ```powershell
 .\tokscale-client.exe connect https://your-api.example.com
 .\tokscale-client.exe run
 ```
 
-将示例地址替换为自己的 API Worker 地址，输入部署时设置的 `INGEST_TOKEN`。地址可以是 Worker 根地址或完整的 `/api/ingest` 地址。`connect` 验证成功后保存配置并退出，随后执行 `run` 开始采集。token 输入不回显。
+Replace the example URL with your API Worker URL and enter the `INGEST_TOKEN` configured during deployment. You can use either the Worker root URL or the full `/api/ingest` URL. After successful verification, `connect` saves the configuration and exits. Run `run` to start collecting. Token input is hidden.
 
-也可以在终端不带参数启动：未配置连接时会交互式询问地址和 token，成功后直接进入采集。后续启动使用已保存的配置，无需再次输入。
+You can also launch the collector in a terminal without arguments. If no connection is configured, it prompts for the URL and token, then starts collecting immediately after verification. Subsequent launches use the saved configuration without prompting again.
 
-| 命令 | 行为 |
+| Command | Behavior |
 | --- | --- |
-| `connect [WORKER_URL]` | 验证并保存连接，也用于修改地址或 token；失败时保留旧配置 |
-| `run` | 使用已有连接持续采集、同步；配置缺失时退出，不等待交互输入 |
-| `local` | 仅采集和提供本地 API，忽略云端连接 |
-| `--help` | 显示命令说明和当前配置文件路径 |
+| `connect [WORKER_URL]` | Verifies and saves a connection; also updates the URL or token. Existing configuration is preserved if verification fails |
+| `run` | Continuously collects and synchronizes using the saved connection; exits without prompting if configuration is missing |
+| `local` | Collects data and serves the local API only, ignoring the cloud connection |
+| `--help` | Shows command help and the current configuration file path |
 
-为其他主机重复上述连接步骤，使用同一个 API 地址和 token，即可在控制台统一查看。
+Repeat these steps on other hosts using the same API URL and token to view them together in the console.
 
-## 部署到 Cloudflare
+## Deploy to Cloudflare
 
-本项目将发布流程分开：**GitHub Actions 构建 Rust 采集器，Cloudflare Workers Builds 构建并部署云端服务**。部署者使用自己的 Cloudflare 账号、D1 数据库和 `INGEST_TOKEN`，无需在 GitHub 中配置 Cloudflare 部署凭据。先按下面的步骤完成首次部署，再连接仓库开启自动构建。
+**GitHub Actions builds the Rust collector; Cloudflare Workers Builds builds and deploys the cloud services.** Each deployer uses their own Cloudflare account, D1 database, and `INGEST_TOKEN`. No Cloudflare deployment credentials need to be configured in GitHub. Complete the initial deployment below, then connect your repository to enable automatic builds.
 
-### 1. 准备账号与工具
+### 1. Prepare your account and tools
 
-需要一个可使用 Workers、D1 的 Cloudflare 账号，以及 Node.js 24 和 npm。只有从源码编译采集器时才需要 Rust。
+You need a Cloudflare account with access to Workers and D1, plus Node.js 24 and npm. Rust is only required if you build the collector from source.
 
-计划使用自动构建时，先将本仓库 fork 到自己的 GitHub 账号。获取代码后，在**仓库根目录**安装依赖，再进入 `worker` 目录：
+If you plan to use automatic builds, first fork this repository into your own GitHub account. After checking out the code, install dependencies from the **repository root**, then enter the `worker` directory:
 
 ```bash
 npm --prefix worker ci
@@ -107,21 +109,21 @@ npx wrangler login
 npx wrangler whoami
 ```
 
-后续 Cloudflare 命令均在 **`worker/` 目录**执行。`login` 使用浏览器完成账号授权，`whoami` 用于核对目标账号；有多个账号时，可在两份 Wrangler 配置中填写目标 `account_id`。
+Run all subsequent Cloudflare commands from **`worker/`**. The `login` command opens a browser to authorize your account, and `whoami` lets you verify the target account. If you have multiple accounts, you can specify the target `account_id` in both Wrangler configuration files.
 
-### 2. 创建 D1 数据库
+### 2. Create a D1 database
 
 ```bash
 npx wrangler d1 create tokscale-serverless --config api/wrangler.jsonc
 ```
 
-记录命令返回的 `database_id`。已有数据库时可以复用对应的名称和 ID，无需重新创建。创建与迁移命令的说明见 [Cloudflare D1 文档](https://developers.cloudflare.com/d1/wrangler-commands/)。
+Record the `database_id` returned by the command. You can reuse an existing database's name and ID instead of creating another one. See the [Cloudflare D1 documentation](https://developers.cloudflare.com/d1/wrangler-commands/) for database creation and migration commands.
 
-### 3. 配置两个 Worker
+### 3. Configure both Workers
 
-仓库中的 Wrangler 文件包含现有部署的域名和数据库 ID。首次部署到自己的账号时，需要替换这些值。下面给出使用 `workers.dev` 域名的完整最小配置。
+The Wrangler files in this repository use `workers.dev` by default, with no custom domains or account-specific resource IDs. Before deploying, replace `YOUR_D1_DATABASE_ID` in the API configuration with your own database ID. The following are complete minimal configurations using `workers.dev` domains.
 
-将 [`api/wrangler.jsonc`](worker/api/wrangler.jsonc) 改为以下内容，并填入上一步返回的数据库 ID：
+Replace [`api/wrangler.jsonc`](worker/api/wrangler.jsonc) with the following, inserting the database ID from the previous step:
 
 ```jsonc
 {
@@ -142,7 +144,7 @@ npx wrangler d1 create tokscale-serverless --config api/wrangler.jsonc
 }
 ```
 
-将 [`console/wrangler.jsonc`](worker/console/wrangler.jsonc) 改为：
+Replace [`console/wrangler.jsonc`](worker/console/wrangler.jsonc) with:
 
 ```jsonc
 {
@@ -166,74 +168,74 @@ npx wrangler d1 create tokscale-serverless --config api/wrangler.jsonc
 }
 ```
 
-可以自定义两个 Worker 的 `name`，但控制台的 `services[].service` 必须与 API Worker 的名称完全一致。代码使用的绑定名称 `DB`、`API`、`ASSETS` 应保持不变。`routes: []` 用于清除仓库原有的自定义域名配置。
+You can customize each Worker's `name`, but the console's `services[].service` must exactly match the API Worker's name. Keep the binding names `DB`, `API`, and `ASSETS` unchanged, as the code uses them. Leave `routes: []` unless you want to configure your own custom domains.
 
-### 4. 初始化远程数据库
+### 4. Initialize the remote database
 
 ```bash
 npx wrangler d1 migrations apply DB --remote --config api/wrangler.jsonc
 ```
 
-首次执行会创建所需表结构。这里必须使用 `--remote`；`--local` 仅操作开发环境的本地数据库。
+The first run creates the required tables. Use `--remote` here; `--local` only modifies the local development database.
 
-### 5. 部署 API 并设置共享 token
+### 5. Deploy the API and set the shared token
 
 ```bash
 npx wrangler deploy --config api/wrangler.jsonc
 npx wrangler secret put INGEST_TOKEN --config api/wrangler.jsonc
 ```
 
-按提示输入自己选择的共享 token，并保存以供控制台和各台采集器使用。`INGEST_TOKEN` 未配置时，API 的受保护接口会拒绝请求；`/health` 可公开访问。
+Enter a shared token of your choice when prompted, and save it for the console and each collector. Protected API endpoints reject requests if `INGEST_TOKEN` is not configured; `/health` remains publicly accessible.
 
-记录部署输出的 API URL，例如 `https://tokscale-serverless-api.<你的子域>.workers.dev`。首次使用 Workers 时，按 Wrangler 提示完成 `workers.dev` 子域配置。线上 token 通过 [Worker Secrets](https://developers.cloudflare.com/workers/configuration/secrets/) 设置，不能用本地 `.dev.vars` 代替。
+Record the API URL printed during deployment, such as `https://tokscale-serverless-api.<your-subdomain>.workers.dev`. If this is your first time using Workers, follow Wrangler's prompts to configure your `workers.dev` subdomain. Configure the production token through [Worker Secrets](https://developers.cloudflare.com/workers/configuration/secrets/); a local `.dev.vars` file does not configure production secrets.
 
-### 6. 部署网页控制台
+### 6. Deploy the web console
 
 ```bash
 npx wrangler deploy --config console/wrangler.jsonc
 npx wrangler secret put INGEST_TOKEN --config console/wrangler.jsonc
 ```
 
-再次输入与 API **完全相同的 token**。API 应先于控制台部署，以便 Service Binding 找到目标 Worker。记录控制台 URL，例如 `https://tokscale-serverless-console.<你的子域>.workers.dev`。
+Enter **exactly the same token** as for the API. Deploy the API before the console so that the Service Binding can find its target Worker. Record the console URL, such as `https://tokscale-serverless-console.<your-subdomain>.workers.dev`.
 
-当前控制台会在服务端为无凭据的只读请求附加 token，因此上述最小配置提供的是**公开可读的统计面板**。希望仅自己访问时，在接入设备前按下文配置 Cloudflare Access。token 不会注入浏览器页面，控制台也不代理采集写入接口。
+The console currently adds the token on the server for read-only requests that have no credentials, so this minimal configuration provides a **publicly readable statistics dashboard**. To restrict access, configure Cloudflare Access as described below before connecting devices. The token is not injected into browser pages, and the console does not proxy ingestion requests.
 
-### 7. 验证部署并接入设备
+### 7. Verify the deployment and connect devices
 
-1. 访问 API Worker 的 `/health`，应返回 `{"status":"ok"}`。这一步仅检查服务存活。
-2. 在采集主机上执行 `tokscale-client connect <API_URL>`，输入同一个 token；验证成功说明认证可用。
-3. 执行 `tokscale-client run`，等待首次采集，日志中应出现 `cloud sync push complete`。
-4. 打开控制台 URL，确认能看到设备及用量。没有可识别的本地会话时，用量可以为空。
+1. Visit `/health` on the API Worker. It should return `{"status":"ok"}`. This checks service liveness only.
+2. On a collector host, run `tokscale-client connect <API_URL>` and enter the same token. Successful verification confirms that authentication works.
+3. Run `tokscale-client run` and wait for the first collection. The logs should include `cloud sync push complete`.
+4. Open the console URL and confirm that devices and usage appear. Usage may be empty if there are no recognized local sessions.
 
-采集器连接的是 **API Worker URL**；浏览器访问的是 **Console Worker URL**。
+Collectors connect to the **API Worker URL**. Open the **Console Worker URL** in your browser.
 
-### 8. 开启 Cloudflare 原生自动构建
+### 8. Enable automatic builds in Cloudflare
 
-首次部署完成后，分别进入 Cloudflare 控制台中的两个 Worker，打开 **Settings → Builds → Connect**，授权 Cloudflare GitHub App 访问自己的 fork，并连接同一个仓库。后续推送由 [Workers Builds](https://developers.cloudflare.com/workers/ci-cd/builds/) 在 Cloudflare 内完成检查、构建和部署。
+After the initial deployment, open each Worker in the Cloudflare dashboard and go to **Settings → Builds → Connect**. Authorize the Cloudflare GitHub App to access your fork, and connect both Workers to the same repository. Subsequent pushes trigger checks, builds, and deployments within Cloudflare through [Workers Builds](https://developers.cloudflare.com/workers/ci-cd/builds/).
 
-按下表配置两个 Worker。若修改过 Worker 名称，控制台名称必须与对应 `wrangler.jsonc` 中的 `name` 一致；控制台 Worker 的 Service Binding 也需指向自己的 API Worker。
+Configure both Workers as follows. If you changed their names, each name in the dashboard must match `name` in its corresponding `wrangler.jsonc`. The console Worker's Service Binding must also point to your API Worker.
 
-| 设置 | API Worker | Console Worker |
+| Setting | API Worker | Console Worker |
 | --- | --- | --- |
-| 生产分支 | `main` | `main` |
+| Production branch | `main` | `main` |
 | Root directory | `worker/api` | `worker/console` |
 | Build command | `npm --prefix .. ci && npm --prefix .. run check && npm --prefix .. run build:api` | `npm --prefix .. ci && npm --prefix .. run check && npm --prefix .. run build:console` |
 | Deploy command | `npm --prefix .. run deploy:api` | `npm --prefix .. run deploy:console` |
-| Build variable：`NODE_VERSION` | `24` | `24` |
-| Build variable：`SKIP_DEPENDENCY_INSTALL` | `1` | `1` |
-| 非生产分支构建 | 关闭 | 关闭 |
+| Build variable: `NODE_VERSION` | `24` | `24` |
+| Build variable: `SKIP_DEPENDENCY_INSTALL` | `1` | `1` |
+| Builds for non-production branches | Disabled | Disabled |
 
-每个 Worker 的根目录都包含自己的 Wrangler 配置；共享的 `package.json`、锁文件和测试配置位于上一级 `worker/`，所以命令使用 `npm --prefix ..`。这是本仓库的[多 Worker 构建布局](https://developers.cloudflare.com/workers/ci-cd/builds/advanced-setups/)。`SKIP_DEPENDENCY_INSTALL=1` 关闭平台默认安装，改由构建命令中的 `npm ci` 严格使用锁文件；Node 版本和该变量均在 **Build variables and secrets** 中设置，详见[构建镜像配置](https://developers.cloudflare.com/workers/ci-cd/builds/build-image/)。
+Each Worker's root directory contains its own Wrangler configuration. The shared `package.json`, lockfile, and test configuration live one level above, in `worker/`, so the commands use `npm --prefix ..`. This follows a [multiple-Worker build layout](https://developers.cloudflare.com/workers/ci-cd/builds/advanced-setups/). `SKIP_DEPENDENCY_INSTALL=1` disables the platform's automatic dependency installation; the build command instead uses `npm ci` to install from the lockfile. Set this variable and the Node.js version under **Build variables and secrets**. See the [build image configuration](https://developers.cloudflare.com/workers/ci-cd/builds/build-image/) for details.
 
-在 Builds 的 API token 设置中，可以选择由 Cloudflare 自动生成并管理的 token。API 的部署命令还会执行远程 D1 迁移，因此其构建 token 需要目标账号的 **D1 → Edit** 权限；可在 Cloudflare 的 **My Profile → API Tokens** 中调整，或选择已有的合适 token。构建鉴权留在 Cloudflare 内，不需要复制到 GitHub。参见[构建 token 配置](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/#api-token)。
+In the Builds API token settings, you can select a token automatically generated and managed by Cloudflare. The API deployment command also runs remote D1 migrations, so its build token needs **D1 → Edit** permission for the target account. Adjust this under **My Profile → API Tokens**, or select an existing token with the appropriate permissions. Build credentials stay in Cloudflare and do not need to be copied to GitHub. See the [build token configuration](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/#api-token).
 
-`INGEST_TOKEN` 与上述部署 token 用途不同：它用于采集器和 API 之间的认证，应在两个 Worker 的 **Settings → Variables and Secrets** 中设置为相同的运行时 Secret，或使用前面的 `wrangler secret put` 命令。构建过程不需要它，不要把它放进源码、GitHub Actions 或 Build variables。之前已经设置的 Worker Secret 在普通代码部署时会保留。
+`INGEST_TOKEN` serves a different purpose from the deployment token: it authenticates requests between collectors and the API. Set it to the same runtime Secret on both Workers under **Settings → Variables and Secrets**, or use the earlier `wrangler secret put` commands. It is not needed during builds; keep it out of source code, GitHub Actions, and Build variables. Existing Worker Secrets are retained during ordinary code deployments.
 
-保存后推送一次提交，在两个 Worker 的 Builds 页面查看结果。`check` 依次执行 TypeScript 检查、本地 D1 迁移验证和 Worker 测试；`build:api` / `build:console` 只打包，不发布。全部成功后才执行对应的部署命令；API 会先迁移远程 D1，再部署代码。后续数据库迁移应兼容仍在运行的旧版本代码。两个 Worker 独立构建，不保证先后顺序，跨 Worker 的接口更新也应保持兼容。
+Save the settings, push a commit, and check the Builds page for each Worker. The `check` command runs TypeScript checks, local D1 migration validation, and Worker tests in order. The `build:api` and `build:console` commands bundle the Workers without deploying them. The corresponding deployment command runs only after these steps succeed; the API command migrates remote D1 before deploying code. Future database migrations should remain compatible with the previous code version while it is still running. The two Workers build independently with no guaranteed deployment order, so changes to interfaces between them should also remain backward compatible.
 
-### 自定义域名与访问控制
+### Custom domains and access control
 
-使用自定义域名时，域名对应的 zone 需在自己的 Cloudflare 账号中。将两个配置里的 `routes` 分别设置为自己的域名，然后重新部署。API 的配置示例：
+To use custom domains, their zone must be in your Cloudflare account. Set `routes` in each configuration to your own domain, then redeploy. For example, the API configuration can use:
 
 ```jsonc
 "routes": [
@@ -241,12 +243,12 @@ npx wrangler secret put INGEST_TOKEN --config console/wrangler.jsonc
 ]
 ```
 
-控制台可使用 `usage.example.com`。Cloudflare 会为 [Worker Custom Domain](https://developers.cloudflare.com/workers/configuration/routing/custom-domains/) 配置对应路由及证书；若域名已有冲突的 DNS 记录，先处理冲突。
+The console can use `usage.example.com`. Cloudflare configures routing and certificates for a [Worker Custom Domain](https://developers.cloudflare.com/workers/configuration/routing/custom-domains/). Resolve any conflicting DNS records for the domain first.
 
-如需私有面板：
+To make the dashboard private:
 
-1. 在 Cloudflare Zero Trust 中为控制台域名创建 [Access 自托管应用](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/self-hosted-public-app/)，配置允许访问的用户。
-2. 获取 Access team domain 和该应用的 AUD，在 API Worker 配置中加入以下 `vars`，使用真实值替换占位内容：
+1. In Cloudflare Zero Trust, create an [Access self-hosted application](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/self-hosted-public-app/) for the console domain and configure which users may access it.
+2. Obtain your Access team domain and the application's AUD. Add the following `vars` to the API Worker configuration, replacing the placeholders with your values:
 
    ```jsonc
    "vars": {
@@ -255,14 +257,14 @@ npx wrangler secret put INGEST_TOKEN --config console/wrangler.jsonc
    }
    ```
 
-3. 控制台使用自定义域名后，将其 `workers_dev` 设为 `false`，并设置 `preview_urls: false`，避免其他公开入口绕过控制台域名上的 Access 策略；重新部署两个 Worker。
-4. 使用未登录的浏览器验证访问需要认证。API 保留 bearer token 认证，采集器继续通过 API 地址同步；只配置 API 的 `vars` 本身不会为控制台建立访问策略。
+3. Once the console uses a custom domain, set its `workers_dev` to `false` and add `preview_urls: false` to prevent other public entry points from bypassing the Access policy on the console domain. Redeploy both Workers.
+4. Verify in a signed-out browser that access requires authentication. The API retains bearer token authentication, so collectors continue synchronizing through the API URL. Setting the API's `vars` alone does not create an access policy for the console.
 
-采集器目前使用 bearer token，不提供浏览器登录流程；不要将仅允许交互式登录的 Access 策略直接套在采集入口上。
+The collector uses bearer tokens and does not support browser login. Do not apply an Access policy that requires interactive login directly to the ingestion endpoint.
 
-### 后续更新
+### Subsequent updates
 
-已开启 Workers Builds 时，将更改推送到连接仓库的 `main`，由 Cloudflare 自动更新两个 Worker。若仍使用手动部署，在 `worker/` 目录执行：
+With Workers Builds enabled, push changes to `main` in the connected repository to have Cloudflare update both Workers automatically. For manual deployments, run the following from `worker/`:
 
 ```bash
 npm ci
@@ -271,49 +273,49 @@ npm run deploy:api
 npm run deploy:console
 ```
 
-普通代码更新无需重新设置 token。更换 token 时，两个 Worker 和每台采集器都需要更新；采集器可重新执行 `connect`。
+Ordinary code updates do not require resetting the token. When rotating it, update both Workers and every collector. Run `connect` again on collectors to save the new token.
 
-## 采集器配置
+## Collector configuration
 
-### 配置文件
+### Configuration file
 
-设备身份、Worker 地址、token 和采集间隔统一保存在 `device.json`：
+Device identity, Worker URL, token, and collection interval are stored together in `device.json`:
 
-| 系统 | 默认位置 |
+| System | Default location |
 | --- | --- |
-| Linux | `$XDG_CONFIG_HOME/tokscale/device.json`；未设置时为 `~/.config/tokscale/device.json` |
+| Linux | `$XDG_CONFIG_HOME/tokscale/device.json`, or `~/.config/tokscale/device.json` if `XDG_CONFIG_HOME` is unset |
 | macOS | `~/.config/tokscale/device.json` |
-| Windows | 系统 Roaming AppData 下的 `tokscale\device.json`，通常为 `%APPDATA%\tokscale\device.json` |
+| Windows | `tokscale\device.json` under the system Roaming AppData directory, usually `%APPDATA%\tokscale\device.json` |
 
-连接字段为 `syncUrl`、`syncToken`、`refreshIntervalSecs`；已有的 `id`、`name`、`createdAt` 在连接更新时保留。Linux/macOS 保存权限为 `600`，Windows 使用用户配置目录的文件权限。
+Connection fields are `syncUrl`, `syncToken`, and `refreshIntervalSecs`. Existing `id`, `name`, and `createdAt` values are preserved when the connection is updated. Files are saved with mode `600` on Linux and macOS; Windows uses the permissions of the user's configuration directory.
 
-三端都支持使用 `TOKSCALE_CONFIG_DIR` 指定配置目录，使用 `TOKSCALE_HOME` 指定扫描主目录。路径支持中文和空格，建议使用绝对路径；配置变更后重启采集器。`--help` 可查看实际配置位置。
+On all three platforms, use `TOKSCALE_CONFIG_DIR` to select a configuration directory and `TOKSCALE_HOME` to select the home directory to scan. Paths support Unicode characters and spaces; absolute paths are recommended. Restart the collector after changing its configuration. Run `--help` to see the actual configuration path.
 
-### 环境变量
+### Environment variables
 
-| 变量 | 用途与默认行为 |
+| Variable | Purpose and default behavior |
 | --- | --- |
-| `BIND_ADDR` | 本地 API 监听地址，默认 `127.0.0.1:8788` |
-| `TOKSCALE_CONFIG_DIR` | 设备配置、连接配置和上游缓存目录 |
-| `TOKSCALE_HOME` | 扫描主目录，默认当前用户主目录 |
-| `TOKSCALE_CLIENTS` | 可选，逗号分隔的客户端列表，如 `claude,codex,qoder` |
-| `TOKSCALE_PRICING` | `cached`（默认）、`remote` 或 `off` |
-| `TOKSCALE_API_TOKEN` | 可选，保护本地 `/api/*`；与云端 `INGEST_TOKEN` 用途不同 |
-| `REFRESH_INTERVAL_SECS` | 覆盖采集间隔；首次连接默认 `60`，`0` 表示关闭定时扫描 |
-| `SYNC_URL` / `SYNC_TOKEN` | 覆盖已保存的连接；覆盖 URL 时需同时提供 token；空 `SYNC_URL` 关闭同步 |
-| `TOKSCALE_USE_ENV_ROOTS` | 默认 `true`；设为 `false` 后忽略客户端来源目录的环境变量覆盖 |
-| `TOKSCALE_DEVICE_ID` / `TOKSCALE_DEVICE_NAME` | 可选，覆盖设备 ID 或显示名称；通常保留自动生成的 ID |
-| `TOKSCALE_QODER_COEFFS` | 可选，指定 Qoder 估算系数文件；否则读取配置目录中的 `qoder-coeffs.json` |
+| `BIND_ADDR` | Local API listen address; defaults to `127.0.0.1:8788` |
+| `TOKSCALE_CONFIG_DIR` | Directory for device configuration, connection configuration, and upstream caches |
+| `TOKSCALE_HOME` | Home directory to scan; defaults to the current user's home directory |
+| `TOKSCALE_CLIENTS` | Optional comma-separated list of clients, such as `claude,codex,qoder` |
+| `TOKSCALE_PRICING` | `cached` (default), `remote`, or `off` |
+| `TOKSCALE_API_TOKEN` | Optional protection for the local `/api/*` endpoints; separate from the cloud `INGEST_TOKEN` |
+| `REFRESH_INTERVAL_SECS` | Overrides the collection interval; the initial connection defaults to `60`. Set to `0` to disable periodic scans |
+| `SYNC_URL` / `SYNC_TOKEN` | Override the saved connection; overriding the URL also requires a token. An empty `SYNC_URL` disables synchronization |
+| `TOKSCALE_USE_ENV_ROOTS` | Defaults to `true`; setting it to `false` ignores environment overrides for client source directories |
+| `TOKSCALE_DEVICE_ID` / `TOKSCALE_DEVICE_NAME` | Optional overrides for the device ID or display name; normally retain the generated ID |
+| `TOKSCALE_QODER_COEFFS` | Optional path to a Qoder estimation coefficient file; otherwise reads `qoder-coeffs.json` from the configuration directory |
 
-环境变量优先于已保存的配置。直接运行时的覆盖不会写入文件；执行 `connect` 时提供的连接和间隔参数会在验证成功后保存。仅本地采集且未指定间隔时，默认只在启动时扫描一次。
+Environment variables take precedence over saved configuration. Runtime overrides are not written to disk. Connection and interval values supplied when running `connect` are saved after successful verification. In local-only mode, if no interval is specified, the collector scans only once at startup.
 
-价格默认从本地缓存加载；首次没有缓存时，可使用 `TOKSCALE_PRICING=remote` 获取价格。费用属于用量估算，不等同于服务商账单；部分缺少真实 token 信息的 Qoder 记录会按 credits 估算。
+Prices are loaded from the local cache by default. If no cache exists yet, use `TOKSCALE_PRICING=remote` to fetch prices. Costs are usage estimates and may differ from provider invoices. Some Qoder records without actual token counts are estimated from credits.
 
-Qoder 支持系统应用数据目录及 `.qoder/projects` 等会话目录。非标准安装可通过 `QODER_DB_PATH`、`QODER_CN_DB_PATH`、`QODER_HOME`、`QODER_CN_HOME`、`QODER_PROJECTS_DIR`、`QODER_CN_PROJECTS_DIR` 指定数据来源。
+Qoder supports system application data directories and session directories such as `.qoder/projects`. For nonstandard installations, specify data sources through `QODER_DB_PATH`, `QODER_CN_DB_PATH`, `QODER_HOME`, `QODER_CN_HOME`, `QODER_PROJECTS_DIR`, or `QODER_CN_PROJECTS_DIR`.
 
-### 后台运行
+### Run in the background
 
-Linux 提供 [systemd 用户服务示例](client/systemd/tokscale-client.service)。在仓库根目录执行以下命令，将 `./tokscale-client` 替换为已下载或编译的程序路径：
+A [systemd user service example](client/systemd/tokscale-client.service) is provided for Linux. Run the following from the repository root, replacing `./tokscale-client` with the path to your downloaded or compiled binary:
 
 ```bash
 install -Dm755 ./tokscale-client "$HOME/.local/bin/tokscale-client"
@@ -324,36 +326,36 @@ systemctl --user enable --now tokscale-client.service
 journalctl --user -u tokscale-client.service -f
 ```
 
-已经连接过的用户可以跳过 `connect`。如需无需登录也在开机后运行，可启用 `loginctl enable-linger "$USER"`。服务与首次连接应使用相同用户；自定义过 `TOKSCALE_CONFIG_DIR` 时，需在服务中配置相同值。
+Skip `connect` if you have already configured the connection. To run the service at boot without logging in, enable lingering with `loginctl enable-linger "$USER"`. Use the same user for the initial connection and the service. If you customized `TOKSCALE_CONFIG_DIR`, set the same value in the service.
 
-macOS 可通过 launchd 启动 `run`，Windows 可通过任务计划程序启动 `run`。Windows 产物是控制台程序，不能直接用 `sc.exe create` 注册为原生 Windows 服务。
+On macOS, use launchd to start `run`. On Windows, use Task Scheduler to start `run`. The Windows binary is a console application and cannot be registered directly as a native Windows service with `sc.exe create`.
 
-## 本地开发
+## Local development
 
-### 开发依赖
+### Prerequisites
 
-- Rust 1.98，由 [`rust-toolchain.toml`](rust-toolchain.toml) 指定。
-- Node.js 24 和 npm；使用 nvm 时可在仓库根目录运行 `nvm install`。
-- 平台对应的 C/C++ 构建工具。Linux 还需要 `make`、`pkg-config` 和 Perl；macOS 使用 Xcode Command Line Tools，Windows 使用 MSVC C++ Build Tools。
+- Rust 1.98, as specified in [`rust-toolchain.toml`](rust-toolchain.toml).
+- Node.js 24 and npm. With nvm, run `nvm install` from the repository root.
+- C/C++ build tools for your platform. Linux also requires `make`, `pkg-config`, and Perl. Use Xcode Command Line Tools on macOS and MSVC C++ Build Tools on Windows.
 
-在仓库根目录安装依赖并构建采集器：
+Install dependencies and build the collector from the repository root:
 
 ```bash
 npm --prefix worker ci
 cargo build --locked -p tokscale-client
 ```
 
-首次开发时，将 `worker/api/.dev.vars.example` 和 `worker/console/.dev.vars.example` 分别复制为同目录下的 `.dev.vars`，并将两份文件的 `INGEST_TOKEN` 设置为相同的本地开发 token。已有文件时保留原配置。
+For initial development setup, copy `worker/api/.dev.vars.example` and `worker/console/.dev.vars.example` to `.dev.vars` in their respective directories. Set `INGEST_TOKEN` to the same local development token in both files. Preserve existing configuration if these files already exist.
 
 ```bash
 npm --prefix worker run db:migrate
 ```
 
-该命令只初始化本地 D1，不需要 Cloudflare 登录，也不会修改线上数据库。
+This command initializes only the local D1 database. It requires no Cloudflare login and does not modify the production database.
 
-### 启动服务
+### Start the services
 
-在仓库根目录分别打开终端：
+Open separate terminals at the repository root:
 
 ```bash
 # API
@@ -361,21 +363,21 @@ npm --prefix worker run dev -- --ip 127.0.0.1 --port 18787
 ```
 
 ```bash
-# 控制台
+# Console
 npm --prefix worker run dev:console
 ```
 
 ```bash
-# 采集器：输入本地开发 token
+# Collector: enter the local development token
 cargo run --locked -p tokscale-client -- connect http://127.0.0.1:18787
 cargo run --locked -p tokscale-client -- run
 ```
 
-此时 API 为 `http://127.0.0.1:18787`，控制台为 `http://127.0.0.1:8789`，采集器本地 API 为 `http://127.0.0.1:8788`。API 与控制台同时运行时，Wrangler 会连接本地 Service Binding。开发连接会覆盖当前配置中的连接地址；需要与生产配置并存时，在执行 `connect` 和 `run` 的终端中设置独立的 `TOKSCALE_CONFIG_DIR`。
+The API is available at `http://127.0.0.1:18787`, the console at `http://127.0.0.1:8789`, and the collector's local API at `http://127.0.0.1:8788`. When both Workers are running, Wrangler connects the local Service Binding. A development connection overwrites the connection URL in the current configuration. To keep development and production configurations separate, set a dedicated `TOKSCALE_CONFIG_DIR` in the terminals running `connect` and `run`.
 
-只查看本机统计可执行 `cargo run --locked -p tokscale-client -- local`。客户端查询接口包括 `/health`、`/api/summary`、`/api/daily`、`/api/models`、`/api/clients`、`/api/sessions`、`/api/export`，以及用于手动扫描的 `POST /api/refresh`。
+To view local statistics only, run `cargo run --locked -p tokscale-client -- local`. The collector exposes `/health`, `/api/summary`, `/api/daily`, `/api/models`, `/api/clients`, `/api/sessions`, and `/api/export`, plus `POST /api/refresh` for a manual scan.
 
-### 验证与发布
+### Validation and releases
 
 ```bash
 cargo fmt --all -- --check
@@ -385,30 +387,30 @@ npm --prefix worker run check
 npm --prefix worker run build
 ```
 
-[`build.yml`](.github/workflows/build.yml) 包含独立的格式和 Clippy 检查，并在四个目标系统/架构上运行 release 模式测试、构建和打包。推送 `v*` 标签时，只有检查和全部平台构建都通过，才会发布 GitHub Release，并附带 `SHA256SUMS` 校验文件。该工作流只发布采集器，不会自动部署 Cloudflare 服务。
+[`build.yml`](.github/workflows/build.yml) runs separate formatting and Clippy checks, then tests in release mode, builds, and packages the collector for all four platform and architecture targets. Pushing a `v*` tag publishes a GitHub Release with a `SHA256SUMS` checksum file only after the checks and every platform build succeed. This workflow publishes the collector only; it does not deploy Cloudflare services.
 
-工作流使用完整 commit SHA 固定 Action，由 Dependabot 每周检查更新。Rust 缓存区分目标平台和编译参数，只有主分支保存缓存。Action 自带的 Node.js 运行环境仅用于 GitHub CI，下载后的采集器不需要安装 Node.js。
+Actions are pinned to full commit SHAs, with Dependabot checking for updates weekly. Rust caches are separated by target platform and compiler flags, and only the main branch saves caches. The Node.js runtime used by Actions is part of GitHub CI; downloaded collectors do not require Node.js.
 
-云端服务使用上文的 Cloudflare Workers Builds，构建环境为 Node.js 24。`npm --prefix worker run build` 可在本地生成两个 Worker 的 bundle，输出位于 `worker/dist/`；该命令使用 Wrangler `--dry-run`，不会部署线上服务。`check` 只使用本地数据库，`deploy:api` 则会迁移远程 D1 并部署 API，`deploy:console` 部署控制台。
+Cloud services use the Cloudflare Workers Builds setup described above, with Node.js 24 in the build environment. Run `npm --prefix worker run build` locally to bundle both Workers into `worker/dist/`. This uses Wrangler's `--dry-run` and does not deploy production services. The `check` command uses only the local database, while `deploy:api` migrates remote D1 and deploys the API, and `deploy:console` deploys the console.
 
-采集器构建包只包含可执行文件。用户配置在运行时创建；`.dev.vars`、Wrangler 本地数据库和构建目录已被 Git 忽略。采集器统计快照保存在内存，上游解析器使用本地缓存，跨主机历史汇总保存在 D1。
+Collector archives contain only the executable. User configuration is created at runtime. Git ignores `.dev.vars`, Wrangler's local databases, and build directories. Collector statistics snapshots are held in memory, upstream parsers use local caches, and historical summaries across hosts are stored in D1.
 
-## 常见问题
+## Troubleshooting
 
-| 现象 | 排查方式 |
+| Symptom | What to check |
 | --- | --- |
-| `/health` 正常，但连接返回 `401` | 核对 API 的 `INGEST_TOKEN` 与采集器输入是否一致，确认使用 API 地址 |
-| API 返回 `auth_not_configured` | 在 API Worker 上设置 `INGEST_TOKEN` secret，本地 `.dev.vars` 不会作为线上 secret 使用 |
-| 控制台查询返回 `401` | 核对两个 Worker 的 token；使用 Access 时核对 team domain 和 AUD |
-| 提示找不到表 | 确认对正确的 D1 执行了 `migrations apply DB --remote` |
-| 控制台提示找不到 Service Binding 目标 | 先部署 API，核对控制台的 `services[].service` 与 API Worker 名称 |
-| 后台运行找不到配置或数据 | 检查运行用户、`TOKSCALE_CONFIG_DIR`、`TOKSCALE_HOME` 和来源目录权限 |
-| 用量存在但费用不完整 | 检查价格缓存，必要时使用 `TOKSCALE_PRICING=remote` 后重新扫描 |
+| `/health` succeeds, but connecting returns `401` | Confirm that the collector's token matches the API's `INGEST_TOKEN` and that you are using the API URL |
+| The API returns `auth_not_configured` | Set the `INGEST_TOKEN` secret on the API Worker; a local `.dev.vars` file does not configure production secrets |
+| Console queries return `401` | Check that both Workers use the same token. If using Access, also check the team domain and AUD |
+| A table is missing | Confirm that `migrations apply DB --remote` was run against the correct D1 database |
+| The console cannot find its Service Binding target | Deploy the API first and check that the console's `services[].service` matches the API Worker name |
+| The background service cannot find configuration or data | Check the running user, `TOKSCALE_CONFIG_DIR`, `TOKSCALE_HOME`, and source directory permissions |
+| Usage is present, but costs are incomplete | Check the pricing cache; if needed, use `TOKSCALE_PRICING=remote` and rescan |
 
-## 上游项目与致谢
+## Upstream project and acknowledgments
 
-本项目建立在 [junhoyeo/tokscale](https://github.com/junhoyeo/tokscale) 的工作之上。感谢 Junho Yeo 及 Tokscale 社区提供会话解析、token 统计、聚合与定价能力。
+This project builds on [junhoyeo/tokscale](https://github.com/junhoyeo/tokscale). Thanks to Junho Yeo and the Tokscale community for their work on session parsing, token usage tracking, aggregation, and pricing.
 
-采集器直接依赖上游 `tokscale-core`，当前锁定版本见 [`client/Cargo.toml`](client/Cargo.toml)。本项目在这一基础上实现面向自行部署的跨主机同步、Cloudflare Workers/D1 存储和统一统计控制台，并补充 Qoder 数据源及后台运行支持。
+The collector directly depends on the upstream `tokscale-core`; see [`client/Cargo.toml`](client/Cargo.toml) for the pinned version. On top of that foundation, this project provides synchronization across hosts, self-hosted Cloudflare Workers/D1 storage, and a unified usage dashboard, with additional Qoder support and background operation.
 
-上游 Tokscale 使用 [MIT License](https://github.com/junhoyeo/tokscale/blob/main/LICENSE)，其代码版权和许可声明归原作者及贡献者所有。
+Upstream Tokscale is licensed under the [MIT License](https://github.com/junhoyeo/tokscale/blob/main/LICENSE). Its copyright and license notices remain with the original authors and contributors.

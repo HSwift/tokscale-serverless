@@ -24,9 +24,8 @@
 			"service": "tokscale-serverless-api"
 		}
 	],
-	"routes": [
-		{ "pattern": "usage.example.com", "custom_domain": true }
-	]
+	// Use workers.dev by default; add your own custom domain if needed.
+	"routes": []
 	// Secrets: INGEST_TOKEN (same shared token as the api worker) — set with
 	// `npx wrangler secret put INGEST_TOKEN --config console/wrangler.jsonc`.
 	// Used only to authorize server-side read proxies until Access fronts this
