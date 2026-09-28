@@ -53,17 +53,39 @@ describe("console router", () => {
 		expect(assertion).toBe("real.jwt.here");
 	});
 
-	it("never proxies /api/ingest or non-GET methods", async () => {
+	it("forwards collector and installer requests with their original URL, body, and credentials", async () => {
+		for (const authorization of [null, "Bearer collector-token"]) {
+			for (const path of ["/api/ingest", "/api/me", "/install.sh?token=collector-token&type=linux&version=v0.2", "/install.ps1?token=collector-token&type=windows&version=v0.2"]) {
+				const ingest = path === "/api/ingest";
+				const request = new Request(`https://console.example${path}`, {
+					method: ingest ? "POST" : "GET",
+					headers: authorization ? { authorization } : {},
+					body: ingest ? '{"device":{"id":"test"}}' : undefined,
+				});
+				let forwarded: Request | undefined;
+				const response = await routeConsoleRequest(request, makeEnv(req => {
+					forwarded = req;
+					return new Response("api reached");
+				}));
+				expect(await response.text()).toBe("api reached");
+				expect(forwarded?.url).toBe(request.url);
+				expect(forwarded?.headers.get("authorization")).toBe(authorization);
+				if (ingest) expect(await forwarded?.text()).toBe('{"device":{"id":"test"}}');
+			}
+		}
+	});
+
+	it("rejects unsupported methods before reaching the API", async () => {
 		let apiCalled = false;
 		const env = makeEnv(() => {
 			apiCalled = true;
 			return new Response("{}");
 		});
-		const ingest = await routeConsoleRequest(
-			new Request("https://console.example/api/ingest", { method: "POST" }),
+		const install = await routeConsoleRequest(
+			new Request("https://console.example/install.sh", { method: "POST" }),
 			env,
 		);
-		expect(ingest.status).toBe(404);
+		expect(install.status).toBe(404);
 		const put = await routeConsoleRequest(
 			new Request("https://console.example/api/summary", { method: "PUT" }),
 			env,

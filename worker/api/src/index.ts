@@ -1,7 +1,7 @@
 /**
  * tokscale-serverless-api: cloud aggregation point for tokscale-client agents.
  *
- * Local clients push their /api/export payload (TsExport shape) to
+ * Collectors push aggregated usage (TsExport shape) to
  * POST /api/ingest with a shared bearer token; rows upsert idempotently per
  * (device, date, client, model), so any device may resend full history at any
  * time. Read endpoints accept the bearer token (scripts) or a verified
@@ -481,7 +481,7 @@ export default {
 			return json({ status: "ok" });
 		}
 		if ((url.pathname === "/install.sh" || url.pathname === "/install.ps1") && request.method === "GET") {
-			return installerScript(url);
+			return installerScript(url, env);
 		}
 		if (!url.pathname.startsWith("/api/")) {
 			return error(404, "not_found", "unknown route");

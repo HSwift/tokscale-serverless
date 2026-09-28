@@ -20,20 +20,20 @@
 
 ```mermaid
 flowchart LR
-    A[主机 A · 采集器] -->|HTTPS 同步| API[API Worker]
-    B[主机 B · 采集器] -->|HTTPS 同步| API
-    C[主机 C · 采集器] -->|HTTPS 同步| API
+    A[主机 A · 采集器] -->|HTTPS 同步| Console[Console Worker]
+    B[主机 B · 采集器] -->|HTTPS 同步| Console
+    C[主机 C · 采集器] -->|HTTPS 同步| Console
     API --> DB[(Cloudflare D1)]
-    Browser[浏览器] --> Console[Console Worker]
-    Console -->|Service Binding 查询| API
+    Browser[浏览器] --> Console
+    Console -->|Service Binding| API[API Worker]
 ```
 
 | 组件 | 目录 | 职责 |
 | --- | --- | --- |
 | 采集器 | [`client/`](client/) | Rust，解析本地数据、定时上报 |
 | 云端 API | [`worker/api/`](worker/api/) | 验证身份、接收上报、读写 D1、查询汇总结果 |
-| 网页控制台 | [`worker/console/`](worker/console/) | 静态统计页面，通过 Service Binding 查询 API，并为 Access 登录用户生成安装命令 |
-| 数据库迁移 | [`worker/api/migrations/`](worker/api/migrations/) | 设备、每日/小时用量、credits 和已部署的 API 地址的表结构 |
+| 网页控制台 | [`worker/console/`](worker/console/) | 静态统计页面，通过 Service Binding 转发 API 查询、安装脚本及采集上报 |
+| 数据库迁移 | [`worker/api/migrations/`](worker/api/migrations/) | 设备、每日/小时用量及 credits 的表结构 |
 
 控制台通过 **Workers Static Assets** 部署，与 API 是两个独立 Worker，无需另外创建 Cloudflare Pages 项目。
 
@@ -53,7 +53,13 @@ flowchart LR
 
 ### 获取程序
 
-点击**主题按钮旁的下载图标**打开安装弹窗，选择系统和架构后下载最新正式 Release，或复制安装命令：Linux/macOS 使用 Bash，Windows 使用 PowerShell。命令直接包含 API 地址与 `INGEST_TOKEN`，可以重复执行。
+点击**主题按钮旁的下载图标**打开安装弹窗，选择系统和架构后下载最新正式 Release，或复制安装命令：Linux/macOS 使用 Bash，Windows 使用 PowerShell。命令使用当前控制台域名，携带 `token`、`type`、`version` 参数，例如：
+
+```bash
+curl -fsSL 'https://your-console.example.com/install.sh?token=YOUR_TOKEN&type=linux&version=v0.2' | bash
+```
+
+API 校验 `INGEST_TOKEN` 后才返回内含连接地址和 token 的脚本。安装及后续同步均使用控制台域名，无需额外指定 URL。命令可以重复执行，但其中的 token 可能保留在 shell 历史或请求日志中。
 
 安装脚本校验 `SHA256SUMS`，通过 `connect` 保存连接配置，保留已有设备身份。程序安装到 Linux/macOS 的 `~/.local/bin` 或 Windows 的 `%LOCALAPPDATA%\Programs\tokscale`。按终端打印的 `run` 命令开始采集；Linux/macOS 也可执行 `~/.local/bin/tokscale-client service install` 注册[后台服务](#后台运行)。
 
@@ -84,7 +90,7 @@ Windows PowerShell：
 .\tokscale-client.exe run
 ```
 
-将示例地址替换为自己的 API Worker 地址，输入部署时设置的 `INGEST_TOKEN`。地址可以是 Worker 根地址或完整的 `/api/ingest` 地址。`connect` 验证成功后保存配置并退出，随后执行 `run` 开始采集。token 输入不回显。
+将示例地址替换为 API Worker 地址或已配置下文 Access 路径例外的控制台地址，输入部署时设置的 `INGEST_TOKEN`。地址可以是 Worker 根地址或完整的 `/api/ingest` 地址。`connect` 验证成功后保存配置并退出，随后执行 `run` 开始采集。token 输入不回显。
 
 也可以在终端不带参数启动：未配置连接时会交互式询问地址和 token，成功后直接进入采集。后续启动使用已保存的配置，无需再次输入。
 
@@ -129,7 +135,7 @@ Fork 本仓库。在 Cloudflare 中创建名为 `tokscale-serverless` 的 D1 数
 
 在 **Settings → Domains & Routes → Add → Custom Domain** 中为控制台绑定域名，API 域名按需绑定。控制台需要自定义域名，其 `workers.dev` 和版本预览地址默认关闭；API 可以直接使用 `workers.dev` 地址。域名在 Cloudflare 中管理，无需配置 `CUSTOM_DOMAIN`，也无需写入 Git。
 
-`deploy:api` 会从 Wrangler 的部署结果中自动保存 API 的 `workers.dev` 地址。部署完成即可安装第一台采集器，无需额外配置地址变量，也不依赖已有设备上报。
+安装命令使用当前控制台域名，API 从安装脚本请求中取得连接地址，无需在 D1 中保存域名，也不依赖已有设备上报。
 
 ### 4. 用 Access 保护控制台
 
@@ -144,10 +150,10 @@ Fork 本仓库。在 Cloudflare 中创建名为 `tokscale-serverless` 的 D1 数
    | `ACCESS_AUD` | 控制台 Access 应用的 Application Audience（AUD） |
 
    API 配置通过 `keep_vars: true` 保留控制台中的变量。若从含占位 `vars` 的旧配置升级，先部署新版配置。
-3. 保持 [`worker/console/wrangler.jsonc`](worker/console/wrangler.jsonc) 中的 `workers_dev: false` 和 `preview_urls: false`，关闭其他控制台入口；从旧版本升级时，也需要部署这项配置。API 继续接受采集器的 bearer token，不要为采集接口要求浏览器登录。
-4. 用未登录的浏览器确认会进入 Access 登录页，登录后统计数据正常加载。API 的 `/health` 应返回 `200`；`/api/summary` 不带 token 返回 `401`，携带采集器 token 返回 `200`。
+3. 为终端安装及采集同步，在**同一个控制台域名**下添加限定路径的 Self-hosted 应用，精确覆盖 `/install.sh`、`/install.ps1`、`/api/me`、`/api/ingest`，策略选择 **Bypass → Include → Everyone**。更具体的路径应用优先于整个域名的应用，原控制台的 Allow 策略和 AUD 保持不变。仅这四条路径跳过浏览器登录，Worker 仍校验安装参数中的 token 或采集器的 bearer token；不要放行整个 `/api/*`。参见 [Access 路径规则](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/app-paths/)。
+4. 保持 [`worker/console/wrangler.jsonc`](worker/console/wrangler.jsonc) 中的 `workers_dev: false` 和 `preview_urls: false`。用未登录的浏览器确认控制台仍进入登录页，登录后统计正常。上述四个机器接口不带凭据时应返回 `401`，而非跳转登录页（`/api/ingest` 使用 POST 测试）。
 
-随后按[快速开始](#快速开始连接采集器)，用 **API 地址**和 `INGEST_TOKEN` 连接每台主机。后续推送会自动部署并保留运行时密钥；更换 `INGEST_TOKEN` 时，更新两个 Worker 和所有采集器。
+随后在每台主机运行控制台生成的安装命令，或按[快速开始](#快速开始连接采集器)手动连接。后续推送会自动部署并保留运行时密钥；更换 `INGEST_TOKEN` 时，更新两个 Worker 和所有采集器。
 
 ## 采集器配置
 
@@ -293,7 +299,8 @@ npm --prefix worker run build
 
 | 现象 | 排查方式 |
 | --- | --- |
-| `/health` 正常，但连接返回 `401` | 核对 API 的 `INGEST_TOKEN` 与采集器输入是否一致，确认使用 API 地址 |
+| 连接返回 `401` | 核对 API 的 `INGEST_TOKEN` 与采集器输入是否一致 |
+| 安装或同步跳转到登录页 | 核对 Access 的四条路径例外，参见部署步骤 4 |
 | API 返回 `auth_not_configured` | 在 API Worker 上设置 `INGEST_TOKEN` secret，本地 `.dev.vars` 不会作为线上 secret 使用 |
 | 控制台查询返回 `401` | 核对两个 Worker 的 token；使用 Access 时核对 team domain 和 AUD |
 | 提示找不到表 | 确认对正确的 D1 执行了 `migrations apply DB --remote` |

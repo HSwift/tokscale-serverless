@@ -17,9 +17,9 @@
 	"assets": {
 		"directory": "./public",
 		"binding": "ASSETS",
-		// Static assets win by default; /api/* reaches the worker first so it
-		// can be proxied to the api worker (and credential-injected).
-		"run_worker_first": ["/api", "/api/*"]
+		// API and installer requests preserve this custom domain through the
+		// service binding. Machine endpoints validate caller-provided tokens.
+		"run_worker_first": ["/api", "/api/*", "/install.sh", "/install.ps1"]
 	},
 	"services": [
 		{

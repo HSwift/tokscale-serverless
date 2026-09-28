@@ -8,7 +8,7 @@
     "build:console": "npm run build:console:assets && wrangler deploy --config console/wrangler.jsonc --dry-run --outdir dist/console",
     "check": "npm run typecheck && npm run db:migrate && npm run test:ci",
     "deploy": "npm run deploy:api",
-    "deploy:api": "npm run db:migrate:remote && node api/deploy.mjs",
+    "deploy:api": "npm run db:migrate:remote && wrangler deploy --config api/wrangler.jsonc",
     "deploy:console": "npm run build:console:assets && wrangler deploy --config console/wrangler.jsonc",
     "dev": "wrangler dev --config api/wrangler.jsonc",
     "dev:console": "npm run build:console:assets && wrangler dev --config console/wrangler.jsonc --ip 127.0.0.1 --port 8789 --inspector-port 9230",
