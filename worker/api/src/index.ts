@@ -493,12 +493,17 @@ async function dashboard(url: URL, env: Env): Promise<Response> {
 			entity.days.set(row.date, (entity.days.get(row.date) ?? 0) + row.tokens);
 		}
 	}
-	return json(Object.fromEntries(Object.entries(groups).map(([group, entities]) => [group, {
+	return json({ ...Object.fromEntries(Object.entries(groups).map(([group, entities]) => [group, {
 		group,
 		entities: [...entities].map(([key, value]) => ({ key, label: value.label, tokens: value.tokens,
 			days: [...value.days].map(([date, tokens]) => ({ date, tokens })),
 		})).sort((a, b) => b.tokens - a.tokens || a.key.localeCompare(b.key)),
-	}])));
+	}])),
+		// Reuse the same daily rows for cross-filtering in the browser, without
+		// another D1 read when the selected device, tool, model or date changes.
+		breakdown: result.results.map(row => ({ deviceId: row.device_id, client: row.client,
+			modelId: row.model_id, date: row.date, tokens: row.tokens })),
+	});
 }
 
 // Per-day token series per device or per model — feeds the console heatmap's

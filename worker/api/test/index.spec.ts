@@ -268,6 +268,7 @@ describe("D1 usage reduction", () => {
 			expect(combined[group]).toEqual(separate);
 		}
 		expect(combined.devices.entities[0].tokens).toBe(100);
+		expect(combined.breakdown).toEqual([{ deviceId, client: "qoder", modelId: "example-qoder-model-b", date: "2026-09-22", tokens: 100 }]);
 		// Cached results still require authentication on every request.
 		expect((await SELF.fetch(`https://example.com/api/dashboard?${query}`)).status).toBe(401);
 		const corrected = structuredClone(EXPORT_PAYLOAD);
@@ -276,6 +277,7 @@ describe("D1 usage reduction", () => {
 		await postIngest(corrected);
 		const updated = await (await SELF.fetch(`https://example.com/api/dashboard?${query}`, { headers: AUTH })).json();
 		expect(updated.devices.entities[0].tokens).toBe(80);
+		expect(updated.breakdown).toEqual([{ deviceId, client: "qoder", modelId: "example-qoder-model-b", date: "2026-09-22", tokens: 80 }]);
 		expect((await SELF.fetch("https://example.com/api/dashboard?since=bad", { headers: AUTH })).status).toBe(400);
 	});
 });

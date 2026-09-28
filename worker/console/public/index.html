@@ -25,10 +25,9 @@
 		<div class="topside">
 			<dl class="stats" id="stats" aria-live="polite"></dl>
 			<div class="header-actions">
-				<div class="seg small" id="number-format" role="group" aria-label="Token 数字格式">
-					<button type="button" data-format="compact" class="active" aria-pressed="true" title="以 K / M / B 显示 token 数字">简写</button>
-					<button type="button" data-format="exact" aria-pressed="false" title="显示完整 token 数字">完整</button>
-				</div>
+				<button id="number-format" class="icon-btn" type="button" aria-label="显示完整 token 数字" aria-pressed="false" title="当前：简写 · 点击显示完整数字">
+					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M10 3 8 21M16 3l-2 18M4 9h16M3 15h16" /></svg>
+				</button>
 				<button id="install-open" class="icon-btn" type="button" aria-label="安装采集器" title="安装采集器" aria-haspopup="dialog">
 					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4" /></svg>
 				</button>
@@ -79,7 +78,12 @@
 		</div>
 
 		<div class="panel-foot">
-			<span class="range-note" id="range-note"></span>
+			<div class="range-status">
+				<span class="range-note" id="range-note"></span>
+				<button id="clear-date" class="icon-btn hidden" type="button" aria-label="清除日期筛选" title="清除日期筛选">
+					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg>
+				</button>
+			</div>
 			<div class="foot-right">
 				<span class="legend" aria-label="用量强度由低到高">低
 					<i class="l0"></i><i class="l1"></i><i class="l2"></i><i class="l3"></i><i class="l4"></i>

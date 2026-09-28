@@ -202,6 +202,7 @@ body:has(.install-dialog[open]) { overflow: hidden; }
 	cursor: pointer;
 }
 .icon-btn:hover { color: var(--text); border-color: var(--border-strong); }
+.icon-btn[aria-pressed="true"] { color: var(--accent-text); border-color: var(--border-strong); }
 .icon-btn:focus-visible {
 	outline: 2px solid var(--focus);
 	outline-offset: 1px;
@@ -414,6 +415,9 @@ body:has(.install-dialog[open]) { overflow: hidden; }
 	font-size: 12px;
 	font-variant-numeric: tabular-nums;
 }
+
+.range-status { display: flex; align-items: center; gap: 8px; min-width: 0; }
+#clear-date { width: 24px; height: 24px; flex-shrink: 0; }
 
 .foot-right { display: flex; align-items: center; gap: 14px; }
 

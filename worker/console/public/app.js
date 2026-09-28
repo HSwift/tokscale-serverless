@@ -1,5 +1,6 @@
 import { initInstaller } from "./assets/installer.js";
 import { renderDailyCard, formatTokens, toolLabel, SERIES_COLORS } from "./assets/daily-card.js";
+import { filterBreakdown } from "./breakdown.js";
 
 const DAY_MS = 86_400_000;
 const RANGE_DAYS = { week: 7, month: 30, year: 371 };
@@ -25,8 +26,9 @@ const state = {
 	view: "2d",
 	numberFormat: savedNumberFormat(),
 	series: { devices: null, models: null, clients: null },
+	breakdown: null,
 	window: null,
-	selectedDate: toKey(new Date()),
+	selectedDate: null,
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -405,7 +407,8 @@ function renderHeatmap() {
 	const active = calendar.cells.filter((c) => c.tokens > 0).length;
 	const entity = selectedEntity();
 	const scope = entity ? ` · ${entityLabel(entity)}` : "";
-	$("#range-note").textContent = `${fmt(state.window.start)} – ${fmt(state.window.end)} · ${active} 天活跃${scope}`;
+	$("#range-note").textContent = `${fmt(state.window.start)} – ${fmt(state.window.end)} · ${active} 天活跃${scope}${state.selectedDate ? ` · 已选 ${state.selectedDate}` : ""}`;
+	$("#clear-date").classList.toggle("hidden", !state.selectedDate);
 
 	$("#months").classList.toggle("hidden", !hasData);
 	$(".heatmap-row").classList.toggle("hidden", !hasData || state.view !== "2d");
@@ -413,27 +416,35 @@ function renderHeatmap() {
 }
 
 function renderBars() {
+	const totals = state.breakdown ? filterBreakdown(state.breakdown, {
+		group: state.group, selected: state.selected, date: state.selectedDate,
+		since: toKey(new Date(state.window.start)), until: toKey(new Date(state.window.end)),
+	}) : null;
+	const win = state.selectedDate ? { start: parseKey(state.selectedDate), end: parseKey(state.selectedDate) } : state.window;
 	for (const [id, group] of [["bar-clients", "clients"], ["bar-models", "models"], ["bar-devices", "devices"]]) {
 		const panel = document.getElementById(id);
 		const bar = panel.querySelector(".share-bar");
 		const legend = panel.querySelector(".bar-legend");
 		bar.replaceChildren();
 		legend.replaceChildren();
+		bar.removeAttribute("aria-label");
+		const unavailable = !totals && state.selected !== "all" && group !== state.group;
 
 		const rows = (state.series[group]?.entities ?? [])
-			.map((e) => ({ label: entityLabel(e, group), tokens: entityWindowTokens(e) }))
+			.filter(e => totals || state.selected === "all" || (group === state.group && e.key === state.selected))
+			.map((e) => ({ label: entityLabel(e, group), tokens: totals ? (totals[group].get(e.key) ?? 0) : entityWindowTokens(e, win) }))
 			.filter((r) => r.tokens > 0)
 			.sort((a, b) => b.tokens - a.tokens);
 		const total = rows.reduce((acc, r) => acc + r.tokens, 0);
 
 		const totalEl = panel.querySelector(".bar-total");
-		totalEl.textContent = fmtTokens(total);
-		totalEl.title = fmtTokens(total);
+		totalEl.textContent = unavailable ? "—" : fmtTokens(total);
+		totalEl.title = unavailable ? "" : fmtTokens(total);
 
 		if (total === 0) {
 			const li = document.createElement("li");
 			li.className = "bar-empty";
-			li.textContent = "这个范围内没有数据";
+			li.textContent = unavailable ? "请更新 API 以启用关联筛选" : "这个范围内没有数据";
 			legend.append(li);
 			continue;
 		}
@@ -487,23 +498,22 @@ function renderAll() {
 }
 
 function renderDay() {
-	const params = new URLSearchParams({ date: state.selectedDate, group: state.group });
+	const date = state.selectedDate ?? toKey(new Date());
+	const params = new URLSearchParams({ date, group: state.group });
 	if (state.selected !== "all") params.set({ devices: "deviceId", models: "modelId", clients: "client" }[state.group], state.selected);
 	const total = currentEntities().filter(entity => state.selected === "all" || entity.key === state.selected)
-		.reduce((sum, entity) => sum + (entity.days.find(day => day.date === state.selectedDate)?.tokens ?? 0), 0);
-	renderDailyCard({ date: state.selectedDate, today: toKey(new Date()), scope: selectedEntity() ? entityLabel(selectedEntity()) : `全部${GROUP_LABELS[state.group]}`,
+		.reduce((sum, entity) => sum + (entity.days.find(day => day.date === date)?.tokens ?? 0), 0);
+	renderDailyCard({ date, today: toKey(new Date()), scope: selectedEntity() ? entityLabel(selectedEntity()) : `全部${GROUP_LABELS[state.group]}`,
 		query: params.toString(), initialTotal: total, group: state.group, numberFormat: state.numberFormat });
 }
 
 function selectDay(date) {
 	if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || date > toKey(new Date())) return;
+	if (parseKey(date) < state.window.start) return;
 	state.selectedDate = date;
-	for (const cell of document.querySelectorAll(".live[data-date]")) {
-		const selected = cell.dataset.date === date;
-		cell.classList.toggle("selected-day", selected);
-		cell.setAttribute("aria-pressed", String(selected));
-	}
 	hideTooltip();
+	renderHeatmap();
+	renderBars();
 	void renderDay();
 }
 
@@ -518,23 +528,28 @@ function activateSeg(seg, btn) {
 }
 
 function renderNumberFormat() {
-	for (const button of $("#number-format").querySelectorAll("button")) {
-		const active = button.dataset.format === state.numberFormat;
-		button.classList.toggle("active", active);
-		button.setAttribute("aria-pressed", String(active));
-	}
+	const button = $("#number-format");
+	const exact = state.numberFormat === "exact";
+	button.setAttribute("aria-pressed", String(exact));
+	button.setAttribute("aria-label", exact ? "以 K / M / B 显示 token 数字" : "显示完整 token 数字");
+	button.title = exact ? "当前：完整 · 点击显示简写数字" : "当前：简写 · 点击显示完整数字";
 }
 
 function bindControls() {
 	renderNumberFormat();
-	$("#number-format").addEventListener("click", event => {
-		const button = event.target.closest("button[data-format]");
-		if (!button || button.dataset.format === state.numberFormat) return;
-		state.numberFormat = button.dataset.format;
+	$("#number-format").addEventListener("click", () => {
+		state.numberFormat = state.numberFormat === "compact" ? "exact" : "compact";
 		try { localStorage.setItem("tokscale-number-format", state.numberFormat); } catch {}
 		renderNumberFormat();
 		hideTooltip();
 		if (state.window) renderAll();
+	});
+	$("#clear-date").addEventListener("click", () => {
+		state.selectedDate = null;
+		hideTooltip();
+		renderHeatmap();
+		renderBars();
+		void renderDay();
 	});
 	for (const container of [$("#grid"), $("#iso")]) {
 		container.addEventListener("click", event => {
@@ -562,7 +577,7 @@ function bindControls() {
 		if (!btn || btn.dataset.range === state.range) return;
 		state.range = btn.dataset.range;
 		state.window = windowFor(state.range);
-		if (parseKey(state.selectedDate) < state.window.start) state.selectedDate = toKey(new Date());
+		if (state.selectedDate && parseKey(state.selectedDate) < state.window.start) state.selectedDate = null;
 		activateSeg($("#range-seg"), btn);
 		hideTooltip();
 		renderAll();
@@ -577,6 +592,7 @@ function bindControls() {
 		hideTooltip();
 		renderChips();
 		renderHeatmap();
+		renderBars();
 		void renderDay();
 	});
 
@@ -591,6 +607,7 @@ function bindControls() {
 		}
 		hideTooltip();
 		renderHeatmap();
+		renderBars();
 		void renderDay();
 	});
 
@@ -632,6 +649,7 @@ async function boot() {
 		state.series.devices = devices;
 		state.series.models = models;
 		state.series.clients = clients;
+		state.breakdown = data.breakdown ?? null;
 		state.window = windowFor(state.range);
 
 		renderAll();

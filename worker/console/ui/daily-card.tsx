@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { formatTokens, toolLabel, SERIES_COLORS, type NumberFormat } from "./format";
+import { hourlyChartData, hourLabel, hourRange } from "./hourly";
 export { formatTokens, toolLabel, SERIES_COLORS } from "./format";
 
 interface HourlyEntity {
@@ -31,8 +32,6 @@ interface Props {
 	numberFormat: NumberFormat;
 }
 
-const hourLabel = (value: number) => `${String(value).padStart(2, "0")}:00`;
-
 function DailyCard(props: Props) {
 	const [result, setResult] = useState<{ query: string; data?: HourlyData; error?: string }>();
 	const [loading, setLoading] = useState(true);
@@ -60,11 +59,7 @@ function DailyCard(props: Props) {
 		...entity, dataKey: `series_${index}`, color: SERIES_COLORS[index % SERIES_COLORS.length],
 		label: props.group === "clients" && entity.key !== "total" ? toolLabel(entity.key) : entity.label,
 	}));
-	const chartData = Array.from({ length: 24 }, (_, hour) => {
-		const point: Record<string, number> = { hour };
-		for (const entity of series) point[entity.dataKey] = entity.hours[hour]?.tokens ?? 0;
-		return point;
-	});
+	const chartData = hourlyChartData(series);
 	const maxTokens = series.reduce((max, entity) => Math.max(max, ...entity.hours.map(row => row.tokens)), 0);
 	const axisWidth = Math.max(48, Math.min(140, fmt(maxTokens * 1.2).length * 7 + 14));
 	const missing = data && !data.hasHourlyData && data.totalTokens > 0;
@@ -89,11 +84,11 @@ function DailyCard(props: Props) {
 							<stop offset="100%" stopColor="var(--accent)" stopOpacity={.015} />
 						</linearGradient></defs>
 						<CartesianGrid vertical={false} stroke="var(--border)" strokeDasharray="3 5" />
-						<XAxis dataKey="hour" type="number" domain={[0, 23]} ticks={[0, 4, 8, 12, 16, 20, 23]} tickFormatter={hourLabel} minTickGap={20} axisLine={false} tickLine={false} tick={{ fill: "var(--muted)", fontSize: 11 }} />
+						<XAxis dataKey="time" type="number" domain={[0, 24]} ticks={[0, 4, 8, 12, 16, 20, 24]} tickFormatter={hourLabel} minTickGap={20} axisLine={false} tickLine={false} tick={{ fill: "var(--muted)", fontSize: 11 }} />
 						<YAxis width={axisWidth} tickFormatter={fmt} allowDecimals={false} axisLine={false} tickLine={false} tick={{ fill: "var(--muted)", fontSize: 11 }} />
-						<Tooltip cursor={{ stroke: "var(--muted)", strokeDasharray: "3 3" }} content={({ active, payload, label }) => active && payload?.length ?
+						<Tooltip cursor={{ stroke: "var(--muted)", strokeDasharray: "3 3" }} content={({ active, payload }) => active && payload?.length ?
 							<div className="hourly-tooltip">
-								<p>{hourLabel(Number(label))}–{hourLabel(Number(label) + 1)}</p>
+								<p>{hourRange(Number(payload[0].payload.hour))}</p>
 								<ul>{payload.map(item => <li key={String(item.dataKey)}>
 									<span className="name" style={{ color: item.color }}>{item.name}</span>
 									<span className="value">{fmt(Number(item.value))} tokens</span>
