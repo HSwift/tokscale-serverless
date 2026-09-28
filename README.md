@@ -58,7 +58,7 @@ Deploy the backend as described below and have your **API Worker URL** and `INGE
 
 Click the **download icon beside the theme toggle** to open the installation dialog. Choose your OS/architecture, then download the latest published GitHub Release or copy the installation command: Bash on Linux/macOS, PowerShell on Windows. The command includes the API URL and `INGEST_TOKEN` directly and can be reused.
 
-The installer verifies `SHA256SUMS`, uses `connect` to save the connection, and installs under `~/.local/bin` (Linux/macOS) or `%LOCALAPPDATA%\Programs\tokscale` (Windows). Existing device identity is preserved. Follow the printed `run` command to start collection; service registration remains a separate step.
+The installer verifies `SHA256SUMS`, uses `connect` to save the connection, and installs under `~/.local/bin` (Linux/macOS) or `%LOCALAPPDATA%\Programs\tokscale` (Windows). Existing device identity is preserved. Follow the printed `run` command to start collection, or use `~/.local/bin/tokscale-client service install` on Linux/macOS for [background operation](#run-in-the-background).
 
 You can also download directly from [GitHub Releases](https://github.com/HSwift/tokscale-serverless/releases/latest) and connect manually below. If no release is available yet, download an artifact from a successful GitHub Actions build.
 
@@ -96,6 +96,7 @@ You can also launch the collector in a terminal without arguments. If no connect
 | `connect [WORKER_URL]` | Verifies and saves a connection; also updates the URL or token. Existing configuration is preserved if verification fails |
 | `run` | Continuously collects and synchronizes using the saved connection; exits without prompting if configuration is missing |
 | `local` | Collects data and serves the local API only, ignoring the cloud connection |
+| `service <COMMAND>` | Installs and manages a Linux systemd user service or macOS LaunchAgent |
 | `--help` | Shows command help and the current configuration file path |
 
 Repeat these steps on other hosts using the same API URL and token to view them together in the console.
@@ -210,20 +211,26 @@ Estimates are recorded as input tokens because the original input/output/cache s
 
 ### Run in the background
 
-A [systemd user service example](client/systemd/tokscale-client.service) is provided for Linux. Run the following from the repository root, replacing `./tokscale-client` with the path to your downloaded or compiled binary:
+On Linux and macOS, run these commands as your normal user. Replace `./tokscale-client` with the downloaded or compiled binary's path; skip `connect` if already connected:
 
 ```bash
-install -Dm755 ./tokscale-client "$HOME/.local/bin/tokscale-client"
-"$HOME/.local/bin/tokscale-client" connect https://your-api.example.com
-install -Dm644 client/systemd/tokscale-client.service "$HOME/.config/systemd/user/tokscale-client.service"
-systemctl --user daemon-reload
-systemctl --user enable --now tokscale-client.service
-journalctl --user -u tokscale-client.service -f
+./tokscale-client connect https://your-api.example.com
+./tokscale-client service install
+
+~/.local/bin/tokscale-client service status
+~/.local/bin/tokscale-client service logs
 ```
 
-Skip `connect` if you have already configured the connection. To run the service at boot without logging in, enable lingering with `loginctl enable-linger "$USER"`. Use the same user for the initial connection and the service. If you customized `TOKSCALE_CONFIG_DIR`, set the same value in the service.
+`install` copies the executable to `~/.local/bin/tokscale-client`, registers the service, and starts it immediately using the connection in `device.json`. Stop any foreground collector first to avoid a port conflict. No repository checkout or additional token entry is needed.
 
-On macOS, use launchd to start `run`. On Windows, use Task Scheduler to start `run`. The Windows binary is a console application and cannot be registered directly as a native Windows service with `sc.exe create`.
+- **Linux:** installs `tokscale-client.service` under `$XDG_CONFIG_HOME/systemd/user` (default `~/.config/systemd/user`). It attempts to enable lingering for startup at boot and operation while logged out. If permission is denied, run the printed `sudo loginctl enable-linger "$USER"` command. Logs go to the journal.
+- **macOS:** installs `~/Library/LaunchAgents/io.tokscale.collector.plist`. The LaunchAgent starts at login and stops at logout. Logs go to `~/Library/Logs/tokscale-client.log`.
+
+Use `service start`, `stop`, or `restart` to manage the collector, and `service uninstall` to stop and remove the service while keeping the executable, configuration, and logs. To upgrade, run `service install` from the new binary; it replaces the installed executable and restarts the service.
+
+Installation captures the current configuration directory and collector environment options, including custom data paths and `TOKSCALE_QODER_COEFFS`. Run `service install` again after changing those options. The Worker URL and token continue to come from `device.json`; after updating them with `connect`, use `service restart`.
+
+On Windows, use Task Scheduler to start `run`. The Windows binary is a console application and cannot be registered directly as a native Windows service with `sc.exe create`.
 
 ## Local development
 

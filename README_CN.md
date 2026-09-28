@@ -56,7 +56,7 @@ flowchart LR
 
 点击**主题按钮旁的下载图标**打开安装弹窗，选择系统和架构后下载最新正式 Release，或复制安装命令：Linux/macOS 使用 Bash，Windows 使用 PowerShell。命令直接包含 API 地址与 `INGEST_TOKEN`，可以重复执行。
 
-安装脚本校验 `SHA256SUMS`，通过 `connect` 保存连接配置，保留已有设备身份。程序安装到 Linux/macOS 的 `~/.local/bin` 或 Windows 的 `%LOCALAPPDATA%\Programs\tokscale`，按终端打印的 `run` 命令开始采集；后台服务另行注册。
+安装脚本校验 `SHA256SUMS`，通过 `connect` 保存连接配置，保留已有设备身份。程序安装到 Linux/macOS 的 `~/.local/bin` 或 Windows 的 `%LOCALAPPDATA%\Programs\tokscale`。按终端打印的 `run` 命令开始采集；Linux/macOS 也可执行 `~/.local/bin/tokscale-client service install` 注册[后台服务](#后台运行)。
 
 也可从 [GitHub Releases](https://github.com/HSwift/tokscale-serverless/releases/latest) 下载后按下文手动连接；尚未发布版本时，可以在成功的 GitHub Actions 构建中下载 artifact。
 
@@ -94,6 +94,7 @@ Windows PowerShell：
 | `connect [WORKER_URL]` | 验证并保存连接，也用于修改地址或 token；失败时保留旧配置 |
 | `run` | 使用已有连接持续采集、同步；配置缺失时退出，不等待交互输入 |
 | `local` | 仅采集和提供本地 API，忽略云端连接 |
+| `service <COMMAND>` | 安装和管理 Linux systemd 用户服务或 macOS LaunchAgent |
 | `--help` | 显示命令说明和当前配置文件路径 |
 
 为其他主机重复上述连接步骤，使用同一个 API 地址和 token，即可在控制台统一查看。
@@ -208,20 +209,26 @@ Qoder 支持系统应用数据目录及 `.qoder/projects` 等会话目录。非�
 
 ### 后台运行
 
-Linux 提供 [systemd 用户服务示例](client/systemd/tokscale-client.service)。在仓库根目录执行以下命令，将 `./tokscale-client` 替换为已下载或编译的程序路径：
+Linux 和 macOS 均使用以下命令，以日常用户身份执行。将 `./tokscale-client` 替换为下载或编译的程序路径，已连接过的用户跳过 `connect`：
 
 ```bash
-install -Dm755 ./tokscale-client "$HOME/.local/bin/tokscale-client"
-"$HOME/.local/bin/tokscale-client" connect https://your-api.example.com
-install -Dm644 client/systemd/tokscale-client.service "$HOME/.config/systemd/user/tokscale-client.service"
-systemctl --user daemon-reload
-systemctl --user enable --now tokscale-client.service
-journalctl --user -u tokscale-client.service -f
+./tokscale-client connect https://your-api.example.com
+./tokscale-client service install
+
+~/.local/bin/tokscale-client service status
+~/.local/bin/tokscale-client service logs
 ```
 
-已经连接过的用户可以跳过 `connect`。如需无需登录也在开机后运行，可启用 `loginctl enable-linger "$USER"`。服务与首次连接应使用相同用户；自定义过 `TOKSCALE_CONFIG_DIR` 时，需在服务中配置相同值。
+`install` 自动将程序复制到 `~/.local/bin/tokscale-client`，注册并立即启动服务，复用 `device.json` 中的连接。安装前先停止前台运行的采集器，避免端口冲突。无需下载整个仓库，也无需重新输入 token。
 
-macOS 可通过 launchd 启动 `run`，Windows 可通过任务计划程序启动 `run`。Windows 产物是控制台程序，不能直接用 `sc.exe create` 注册为原生 Windows 服务。
+- **Linux：**在 `$XDG_CONFIG_HOME/systemd/user`（默认 `~/.config/systemd/user`）安装 `tokscale-client.service`，并尝试启用 lingering，使其开机启动、退出登录后仍可运行。如果权限不足，按提示执行 `sudo loginctl enable-linger "$USER"`。日志写入 journal。
+- **macOS：**安装 `~/Library/LaunchAgents/io.tokscale.collector.plist`，登录后自动启动，退出登录时停止。日志写入 `~/Library/Logs/tokscale-client.log`。
+
+使用 `service start`、`stop`、`restart` 管理运行状态；`service uninstall` 停止并移除服务，保留程序、配置和日志。升级时，对新下载的程序执行 `service install`，即可替换已安装程序并重启服务。
+
+安装时会记录当前配置目录和采集器环境变量，包括自定义数据目录及 `TOKSCALE_QODER_COEFFS`；修改这些选项后重新执行 `service install`。Worker 地址和 token 始终从 `device.json` 读取，通过 `connect` 更新后执行 `service restart` 即可。
+
+Windows 使用任务计划程序启动 `run`。Windows 产物是控制台程序，不能直接用 `sc.exe create` 注册为原生 Windows 服务。
 
 ## 本地开发
 

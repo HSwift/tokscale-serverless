@@ -8,6 +8,7 @@ mod export;
 mod handlers;
 mod qoder;
 mod scan;
+mod service;
 mod state;
 mod sync;
 
@@ -28,7 +29,14 @@ async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let command = args.first().map(String::as_str).unwrap_or("");
     if matches!(command, "--help" | "-h" | "help") {
-        println!("tokscale-client [connect [WORKER_URL] | run | local]\n\n  connect  Verify and save Worker URL/token (token input is hidden)\n  run      Collect and sync using saved credentials, without prompts\n  local    Collect locally without cloud sync\n\nWith no command, first-time interactive startup offers connection setup.\nConfiguration: {}\nEnvironment variables override saved configuration.", config::connection_path().display());
+        println!("tokscale-client [connect [WORKER_URL] | run | local | service <COMMAND>]\n\n  connect  Verify and save Worker URL/token (token input is hidden)\n  run      Collect and sync using saved credentials, without prompts\n  local    Collect locally without cloud sync\n  service  Install and manage a Linux/macOS background service\n           Commands: install, uninstall, start, stop, restart, status, logs\n\nWith no command, first-time interactive startup offers connection setup.\nConfiguration: {}\nEnvironment variables override saved configuration.", config::connection_path().display());
+        return;
+    }
+    if command == "service" {
+        if let Err(error) = service::execute(&args[1..]) {
+            eprintln!("service error: {error}");
+            std::process::exit(2);
+        }
         return;
     }
     if command == "connect" && args.len() <= 2 {
@@ -39,7 +47,9 @@ async fn main() {
         return;
     }
     if !matches!(command, "" | "run" | "local") || args.len() > 1 {
-        eprintln!("usage: tokscale-client [connect [WORKER_URL] | run | local]");
+        eprintln!(
+            "usage: tokscale-client [connect [WORKER_URL] | run | local | service <COMMAND>]"
+        );
         std::process::exit(2);
     }
 
