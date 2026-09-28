@@ -180,13 +180,31 @@ Fork 本仓库。在 Cloudflare 中创建名为 `tokscale-serverless` 的 D1 数
 | `SYNC_URL` / `SYNC_TOKEN` | 覆盖已保存的连接；覆盖 URL 时需同时提供 token；空 `SYNC_URL` 关闭同步 |
 | `TOKSCALE_USE_ENV_ROOTS` | 默认 `true`；设为 `false` 后忽略客户端来源目录的环境变量覆盖 |
 | `TOKSCALE_DEVICE_ID` / `TOKSCALE_DEVICE_NAME` | 可选，覆盖设备 ID 或显示名称；通常保留自动生成的 ID |
-| `TOKSCALE_QODER_COEFFS` | 可选，指定 Qoder 估算系数文件；否则读取配置目录中的 `qoder-coeffs.json` |
+| `TOKSCALE_QODER_COEFFS` | 用户实测的 Qoder 系数文件路径；默认读取 `device.json` 同目录下的 `qoder-coeffs.json`，不提供内置系数 |
 
 环境变量优先于已保存的配置。直接运行时的覆盖不会写入文件；执行 `connect` 时提供的连接和间隔参数会在验证成功后保存。仅本地采集且未指定间隔时，默认只在启动时扫描一次。
 
-价格默认从本地缓存加载；首次没有缓存时，可使用 `TOKSCALE_PRICING=remote` 获取价格。费用属于用量估算，不等同于服务商账单；部分缺少真实 token 信息的 Qoder 记录会按 credits 估算。
+价格默认从本地缓存加载；首次没有缓存时，可使用 `TOKSCALE_PRICING=remote` 获取价格。费用属于用量估算，不等同于服务商账单。
 
 Qoder 支持系统应用数据目录及 `.qoder/projects` 等会话目录。非标准安装可通过 `QODER_DB_PATH`、`QODER_CN_DB_PATH`、`QODER_HOME`、`QODER_CN_HOME`、`QODER_PROJECTS_DIR`、`QODER_CN_PROJECTS_DIR` 指定数据来源。
+
+### Qoder credits 估算
+
+始终优先使用真实 token 数。对于只有 credits 的记录，必须**自行测量每个模型的系数**才能估算 token。未配置有效系数的模型仍保留 credits，但不估算 token。
+
+按模型收集多条同时包含 credits 和真实 token 数的代表性记录，计算 `tokensPerCredit = token 总数 / credits 总数`。不要重复计算缓存输入：Qoder 的 `input_tokens` 已包含 `cache_read_input_tokens`。系数受模型、任务和缓存命中情况影响，发生变化后应重新测量。
+
+在 `device.json` 同目录创建 `qoder-coeffs.json`，或用 `TOKSCALE_QODER_COEFFS` 指定文件的绝对路径：
+
+```json
+{
+  "your-model-id": { "tokensPerCredit": 1000 }
+}
+```
+
+`1000` **只是格式示例，不是实测值或推荐值**。请换成自己的测量结果，模型 ID 必须与记录完全一致，系数必须为有限正数。配置后重启采集器；作为服务运行时，使用相同用户和配置目录，或在服务环境中设置 `TOKSCALE_QODER_COEFFS`。旧的 `pf`/`d` 格式不再使用。
+
+由于无法还原输入、输出和缓存的比例，估算值统一记入输入 token。系数文件只保留在本机，已加入 Git 忽略规则，不会打包进发布程序。移除系数后，下一次同步可能降低此前估算的用量。
 
 ### 后台运行
 

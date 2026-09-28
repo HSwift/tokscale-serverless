@@ -8,15 +8,13 @@
 //! - Headless/agent-runner installs: Claude-shaped transcript JSONL under
 //!   `*/projects/**`. When real usage is absent (recorded before
 //!   `QODER_EXPOSE_TOKEN_USAGE=1`), billable tokens are estimated from
-//!   `usage.credits` via the fitted [`CoeffTable`] and flagged
+//!   `usage.credits` only with a user-configured [`CoeffTable`] and flagged
 //!   `CostSource::Estimated`; real metrics always take priority. Credits are
 //!   not USD, so they are reported through [`QoderCredit`] side-band data,
 //!   never through `UnifiedMessage.cost`.
 //!
-//! The same file can appear under several roots (on this machine
-//! `~/.agent-runner/qoder-home/projects` and `~/.qoder/projects` are
-//! hardlinks to one inode), so every emitted row is deduped by a stable
-//! message key across all roots.
+//! The same file can appear under several roots, so every emitted row is
+//! deduped by a stable message key across all roots.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -407,7 +405,7 @@ fn parse_transcript(
             .unwrap_or("unknown")
             .to_string();
         // Fallback for records that predate real usage recording: derive
-        // billable tokens from credits via the fitted coefficient table.
+        // tokens from credits only with the user's measured coefficient table.
         // The cache split is unknowable, so the estimate lands entirely in
         // uncached input and is flagged CostSource::Estimated.
         let mut cost_source = CostSource::ProviderReported;
@@ -537,7 +535,7 @@ mod tests {
                 "message": {
                     "id": msg_id,
                     "role": "assistant",
-                    "model": "kmodel_latest",
+                    "model": "test-model",
                     "usage": {
                         "credits": credits,
                         "input_tokens": 0,
@@ -565,7 +563,18 @@ mod tests {
 
         let mut out = QoderScan::default();
         let mut seen = HashSet::new();
-        let coeffs = CoeffTable::load();
+        // With no user configuration, credits survive but tokens are not invented.
+        parse_projects(&dir, &mut seen, &mut out, &CoeffTable::default());
+        assert_eq!(out.messages.len(), 2);
+        assert_eq!(out.credits.len(), 2);
+        assert!(out.messages.iter().all(|m| m.tokens.total() == 0));
+        assert_eq!(out.credits.iter().map(|c| c.credits).sum::<f64>(), 3.5);
+        assert_hourly_usage(&out, out.messages[0].timestamp, 0);
+
+        let mut out = QoderScan::default();
+        let mut seen = HashSet::new();
+        let coeffs: CoeffTable =
+            serde_json::from_str(r#"{"test-model":{"tokensPerCredit":1000}}"#).unwrap();
         parse_projects(&dir, &mut seen, &mut out, &coeffs);
         assert_eq!(
             out.messages.len(),
@@ -576,15 +585,12 @@ mod tests {
         let total: f64 = out.credits.iter().map(|c| c.credits).sum();
         assert!((total - 3.5).abs() < 1e-9);
         assert_eq!(out.messages[0].client, "qoder");
-        assert_eq!(out.messages[0].model_id, "kmodel_latest");
+        assert_eq!(out.messages[0].model_id, "test-model");
         assert_eq!(out.messages[0].cost, 0.0, "credits must not leak into cost");
         assert!(!out.messages[0].date.is_empty());
         // No real usage recorded: tokens estimated from credits and flagged.
         assert_eq!(out.messages[0].cost_source, CostSource::Estimated);
-        assert_eq!(
-            out.messages[0].tokens.input,
-            (1.5_f64 * 4336.0 / 0.933).round() as i64
-        );
+        assert_eq!(out.messages[0].tokens.input, 1500);
         assert!(out.messages[0].tokens.total() > 0);
         let timestamp_ms = chrono::DateTime::parse_from_rfc3339("2026-08-30T11:00:00Z")
             .unwrap()
@@ -612,20 +618,21 @@ mod tests {
             "message": {
                 "id": "m-tok",
                 "role": "assistant",
-                "model": "qmodel_38max",
+                "model": "test-model",
                 "usage": {
                     "input_tokens": 25106,
                     "cache_read_input_tokens": 24782,
                     "cache_creation_input_tokens": 0,
                     "output_tokens": 104,
-                    "credits": 0.10949828571428571
+                    "credits": 0.5
                 }
             }
         });
         std::fs::write(dir.join("s.jsonl"), serde_json::to_string(&record).unwrap()).unwrap();
         let mut out = QoderScan::default();
         let mut seen = HashSet::new();
-        let coeffs = CoeffTable::load();
+        let coeffs: CoeffTable =
+            serde_json::from_str(r#"{"test-model":{"tokensPerCredit":1000}}"#).unwrap();
         parse_projects(&dir, &mut seen, &mut out, &coeffs);
         assert_eq!(out.messages.len(), 1);
         let m = &out.messages[0];
@@ -641,6 +648,15 @@ mod tests {
             .timestamp_millis();
         assert_eq!(m.timestamp, timestamp_ms);
         assert_hourly_usage(&out, timestamp_ms, 25106 + 104);
+        let mut without_coeffs = QoderScan::default();
+        parse_projects(
+            &dir,
+            &mut HashSet::new(),
+            &mut without_coeffs,
+            &CoeffTable::default(),
+        );
+        assert_eq!(without_coeffs.messages[0].tokens.total(), 25106 + 104);
+        assert_hourly_usage(&without_coeffs, timestamp_ms, 25106 + 104);
         std::fs::remove_dir_all(&dir).ok();
     }
 

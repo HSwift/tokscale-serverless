@@ -182,13 +182,31 @@ On all three platforms, use `TOKSCALE_CONFIG_DIR` to select a configuration dire
 | `SYNC_URL` / `SYNC_TOKEN` | Override the saved connection; overriding the URL also requires a token. An empty `SYNC_URL` disables synchronization |
 | `TOKSCALE_USE_ENV_ROOTS` | Defaults to `true`; setting it to `false` ignores environment overrides for client source directories |
 | `TOKSCALE_DEVICE_ID` / `TOKSCALE_DEVICE_NAME` | Optional overrides for the device ID or display name; normally retain the generated ID |
-| `TOKSCALE_QODER_COEFFS` | Optional path to a Qoder estimation coefficient file; otherwise reads `qoder-coeffs.json` from the configuration directory |
+| `TOKSCALE_QODER_COEFFS` | Path to user-measured Qoder coefficients; defaults to `qoder-coeffs.json` beside `device.json`. No coefficients are bundled |
 
 Environment variables take precedence over saved configuration. Runtime overrides are not written to disk. Connection and interval values supplied when running `connect` are saved after successful verification. In local-only mode, if no interval is specified, the collector scans only once at startup.
 
-Prices are loaded from the local cache by default. If no cache exists yet, use `TOKSCALE_PRICING=remote` to fetch prices. Costs are usage estimates and may differ from provider invoices. Some Qoder records without actual token counts are estimated from credits.
+Prices are loaded from the local cache by default. If no cache exists yet, use `TOKSCALE_PRICING=remote` to fetch prices. Costs are usage estimates and may differ from provider invoices.
 
 Qoder supports system application data directories and session directories such as `.qoder/projects`. For nonstandard installations, specify data sources through `QODER_DB_PATH`, `QODER_CN_DB_PATH`, `QODER_HOME`, `QODER_CN_HOME`, `QODER_PROJECTS_DIR`, or `QODER_CN_PROJECTS_DIR`.
+
+### Qoder credit estimates
+
+Real token counts always take priority. For records that contain only credits, **measure your own per-model ratios** to enable token estimates. Without a valid coefficient for a model, its credits are retained but no tokens are estimated.
+
+For each model, collect representative records with both credits and real token counts, then calculate `tokensPerCredit = sum(tokens) / sum(credits)`. Do not count cached input twice: Qoder's `input_tokens` already includes `cache_read_input_tokens`. Ratios depend on the model, workload, and cache usage; repeat the measurement when those change.
+
+Create `qoder-coeffs.json` beside `device.json`, or set `TOKSCALE_QODER_COEFFS` to your file's absolute path:
+
+```json
+{
+  "your-model-id": { "tokensPerCredit": 1000 }
+}
+```
+
+`1000` is an illustrative value, **not a measured or recommended coefficient**. Replace it with your result and use the exact model ID from your records. Each ratio must be positive and finite. Restart the collector after configuration; for a service, use the same user/configuration directory or set `TOKSCALE_QODER_COEFFS` in its environment. The old `pf`/`d` format is no longer used.
+
+Estimates are recorded as input tokens because the original input/output/cache split is unknown. Keep this file local; it is ignored by Git and is not included in release builds. Removing coefficients can lower previously estimated totals on the next synchronization.
 
 ### Run in the background
 
