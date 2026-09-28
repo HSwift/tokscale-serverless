@@ -20,12 +20,12 @@
 	--tooltip-muted: #a8b3c5;
 	--tooltip-entity: #79b8ff;
 
-	/* blue ramp + l0 empty cell: l1-l4 are theme-independent by design */
+	/* Empty cells stay neutral; blue darkens as usage increases in both themes. */
 	--l0: #1a2233;
-	--l1: #0d419d;
-	--l2: #1f6feb;
-	--l3: #388bfd;
-	--l4: #79b8ff;
+	--l1: #79b8ff;
+	--l2: #388bfd;
+	--l3: #1f6feb;
+	--l4: #0d419d;
 
 	--sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue",
 		"PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
