@@ -417,7 +417,7 @@ body:has(.install-dialog[open]) { overflow: hidden; }
 }
 
 .range-status { display: flex; align-items: center; gap: 8px; min-width: 0; }
-#clear-date { width: 24px; height: 24px; flex-shrink: 0; }
+#clear-date { width: 24px; height: 24px; padding: 0; flex-shrink: 0; }
 
 .foot-right { display: flex; align-items: center; gap: 14px; }
 
