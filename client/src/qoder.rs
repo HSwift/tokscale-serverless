@@ -143,8 +143,8 @@ fn projects_candidates(home: &Path, env: impl Fn(&str) -> Option<PathBuf>) -> Ve
     v
 }
 
-fn local_date(secs: i64) -> String {
-    chrono::DateTime::from_timestamp(secs, 0)
+fn local_date(timestamp_ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(timestamp_ms)
         .map(|dt| {
             dt.with_timezone(&chrono::Local)
                 .format("%Y-%m-%d")
@@ -256,12 +256,12 @@ fn parse_db(path: &Path, seen: &mut HashSet<String>, out: &mut QoderScan) {
         if !seen.insert(dedup.clone()) {
             continue;
         }
-        let secs = gmt_create_ms / 1000;
         let mut msg = blank_message(QODER_CLIENT);
         msg.model_id = model_from_db(model_info.as_deref(), record_extra.as_deref());
         msg.session_id = session_id.unwrap_or_default();
-        msg.timestamp = secs;
-        msg.date = local_date(secs);
+        // UnifiedMessage timestamps are milliseconds, as are Qoder's DB values.
+        msg.timestamp = gmt_create_ms;
+        msg.date = local_date(gmt_create_ms);
         msg.tokens = tokens;
         msg.dedup_key = Some(dedup);
         out.messages.push(msg);
@@ -395,11 +395,11 @@ fn parse_transcript(
         if !seen.insert(dedup.clone()) {
             continue;
         }
-        let secs = rec
+        let timestamp_ms = rec
             .get("timestamp")
             .and_then(|t| t.as_str())
             .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
-            .map(|t| t.timestamp())
+            .map(|t| t.timestamp_millis())
             .unwrap_or(0);
         let model = message
             .get("model")
@@ -417,12 +417,12 @@ fn parse_transcript(
                 cost_source = CostSource::Estimated;
             }
         }
-        let date = local_date(secs);
+        let date = local_date(timestamp_ms);
         let mut msg = blank_message(QODER_CLIENT);
         msg.model_id = model.clone();
         msg.session_id = session_id.clone();
         msg.workspace_key = rec.get("cwd").and_then(|c| c.as_str()).map(str::to_string);
-        msg.timestamp = secs;
+        msg.timestamp = timestamp_ms;
         msg.date = date.clone();
         msg.tokens = tokens;
         // Credits stay out of `cost`: they are Qoder plan credits, not USD.
@@ -447,6 +447,19 @@ fn usage_i64(usage: &serde_json::Value, key: &str) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Timelike;
+
+    fn assert_hourly_usage(out: &QoderScan, timestamp_ms: i64, tokens: i64) {
+        let expected = chrono::DateTime::from_timestamp_millis(timestamp_ms)
+            .unwrap()
+            .with_timezone(&chrono::Local);
+        let hourly = crate::export::aggregate_hourly(&out.messages);
+        assert_eq!(hourly.len(), 1, "Qoder records must reach hourly export");
+        assert_eq!(hourly[0].date, expected.format("%Y-%m-%d").to_string());
+        assert_eq!(hourly[0].hour, expected.hour());
+        assert_eq!(hourly[0].client, QODER_CLIENT);
+        assert_eq!(hourly[0].tokens, tokens);
+    }
 
     #[test]
     fn discovers_desktop_database_layouts_for_all_platforms() {
@@ -535,7 +548,7 @@ mod tests {
         };
         let lines = [
             record("m1", 1.5, "2026-08-30T11:00:00Z"),
-            record("m2", 2.0, "2026-08-30T11:15:00Z"),
+            record("m2", 2.0, "2026-08-30T11:00:00.500Z"),
             serde_json::json!({"type": "user", "timestamp": "2026-08-30T10:59:00Z"}),
             record("m3-zero", 0.0, "2026-08-30T11:20:00Z"),
         ];
@@ -573,6 +586,15 @@ mod tests {
             (1.5_f64 * 4336.0 / 0.933).round() as i64
         );
         assert!(out.messages[0].tokens.total() > 0);
+        let timestamp_ms = chrono::DateTime::parse_from_rfc3339("2026-08-30T11:00:00Z")
+            .unwrap()
+            .timestamp_millis();
+        assert_eq!(out.messages[0].timestamp, timestamp_ms);
+        assert_hourly_usage(
+            &out,
+            timestamp_ms,
+            out.messages.iter().map(|m| m.tokens.total()).sum(),
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -585,7 +607,7 @@ mod tests {
         // input 25106 includes cache_read 24782 → uncached input is 324.
         let record = serde_json::json!({
             "type": "assistant",
-            "timestamp": "2026-09-21T17:18:22Z",
+            "timestamp": "2026-09-22T02:18:22.123+09:00",
             "sessionId": "sess-tok",
             "message": {
                 "id": "m-tok",
@@ -614,6 +636,11 @@ mod tests {
         assert_eq!(t.total(), 25106 + 104);
         assert_eq!(m.cost_source, CostSource::ProviderReported);
         assert_eq!(out.credits.len(), 1);
+        let timestamp_ms = chrono::DateTime::parse_from_rfc3339("2026-09-21T17:18:22.123Z")
+            .unwrap()
+            .timestamp_millis();
+        assert_eq!(m.timestamp, timestamp_ms);
+        assert_hourly_usage(&out, timestamp_ms, 25106 + 104);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -647,9 +674,10 @@ mod tests {
         assert_eq!(m.tokens.input, 200);
         assert_eq!(m.tokens.cache_read, 800);
         assert_eq!(m.tokens.output, 50);
-        assert_eq!(m.timestamp, 1784681696);
+        assert_eq!(m.timestamp, 1784681696263);
         assert!(!m.date.is_empty());
         assert!(out.credits.is_empty());
+        assert_hourly_usage(&out, 1784681696263, 1050);
         std::fs::remove_dir_all(&dir).ok();
     }
 }
