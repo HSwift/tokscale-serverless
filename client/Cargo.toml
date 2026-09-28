@@ -18,6 +18,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rpassword = "7.5.4"
 hostname = "0.4.2"
+sha2 = "0.10"
+fs2 = "0.4"
 
 [dev-dependencies]
 axum = "0.8"

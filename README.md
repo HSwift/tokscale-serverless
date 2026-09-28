@@ -11,7 +11,7 @@ This project uses Tokscale's `tokscale-core` to parse local session records and 
 - **Usage across hosts**: View usage from multiple computers and development servers in one place, with breakdowns by device, client, model, and date.
 - **Daily usage card**: See today's token total and hourly curves grouped by device, tool, or model. The heatmap and chart share the same selection; click a square to inspect another day. A header control switches all token values between compact and full numbers. Built with React and Recharts, with matching light and dark themes.
 - **Install from the console**: Choose your OS and download the latest published release, or copy an installation command that saves the connection automatically.
-- **Automatic collection and synchronization**: Enter the Worker URL and token once. The collector verifies and saves the connection, then uses it on subsequent launches. By default, it scans and synchronizes every 60 seconds.
+- **Automatic collection and synchronization**: Enter the Worker URL and token once. The collector verifies and saves the connection, then uses it on subsequent launches. By default, it scans hourly and uploads changed data.
 - **Self-hosted deployment**: Run the API, database, and console in your own Cloudflare account, with a shared token authenticating device uploads.
 - **Cross-platform collector**: Build targets are available for Linux x86_64, Windows x86_64, macOS Intel, and Apple Silicon.
 - **Qoder support**: An additional Qoder data source extends upstream parsing support. Credits are tracked separately from costs in USD.
@@ -177,6 +177,21 @@ Connection fields are `syncUrl`, `syncToken`, and `refreshIntervalSecs`. Existin
 
 On all three platforms, use `TOKSCALE_CONFIG_DIR` to select a configuration directory and `TOKSCALE_HOME` to select the home directory to scan. Paths support Unicode characters and spaces; absolute paths are recommended. Restart the collector after changing its configuration. Run `--help` to see the actual configuration path.
 
+### Incremental and full synchronization
+
+The collector keeps `sync-state.json` beside `device.json`. After the first full upload, it sends only changed daily/model rows, credits and hourly buckets. Fingerprints advance only after the API acknowledges success, survive restarts, and detect corrections to older dates (including changed Qoder calibration). Unchanged scans make no upload; idle scans send a device-only heartbeat at most once per hour. Collection still runs at the configured interval.
+
+```sh
+tokscale-client sync         # Sync changes once, then exit
+tokscale-client sync --full  # Resend all available local history, then exit
+```
+
+Use `sync --full` after clearing/restoring D1, or when rebuilding cloud statistics. Full sync bypasses the local anchor and saves a new acknowledged state; it overwrites matching totals without adding them again. Missing local logs do not delete cloud history. The API can accept these incremental payloads without a protocol migration. Run the command as the service user with the same configuration and data-source settings; a local lock serializes manual and background synchronization. Failed uploads return a nonzero exit code and leave the anchor unchanged.
+
+Existing installations retain the interval saved in `device.json`. To switch them to hourly collection, set `refreshIntervalSecs` to `3600` and restart the service; update `REFRESH_INTERVAL_SECS` too if the service environment overrides it.
+
+The API skips unchanged UPSERTs and limits unchanged device heartbeats to once per hour. Ingest responses include D1 `rowsRead` and `rowsWritten` counters. The console fetches its device/tool/model views in one date-bounded query. Statistics responses are cached for up to five minutes within each Worker instance; successful writes invalidate that instance’s cache. The cache is best-effort across instances, requires authentication, and adds no storage bindings.
+
 ### Environment variables
 
 | Variable | Purpose and default behavior |
@@ -185,7 +200,7 @@ On all three platforms, use `TOKSCALE_CONFIG_DIR` to select a configuration dire
 | `TOKSCALE_HOME` | Home directory to scan; defaults to the current user's home directory |
 | `TOKSCALE_CLIENTS` | Optional comma-separated list of clients, such as `claude,codex,qoder` |
 | `TOKSCALE_PRICING` | `cached` (default), `remote`, or `off` |
-| `REFRESH_INTERVAL_SECS` | Overrides the collection interval; the initial connection defaults to `60`. Set to `0` to disable periodic scans |
+| `REFRESH_INTERVAL_SECS` | Overrides the collection interval; the initial connection defaults to `3600` (one hour). Set to `0` to disable periodic scans |
 | `SYNC_URL` / `SYNC_TOKEN` | Override the saved connection; overriding the URL also requires a token. An empty `SYNC_URL` clears the connection for this invocation and prevents collection from starting |
 | `TOKSCALE_USE_ENV_ROOTS` | Defaults to `true`; setting it to `false` ignores environment overrides for client source directories |
 | `TOKSCALE_DEVICE_ID` / `TOKSCALE_DEVICE_NAME` | Optional overrides for the device ID or display name; normally retain the generated ID |
@@ -199,21 +214,41 @@ Qoder supports system application data directories and session directories such 
 
 ### Qoder credit estimates
 
-Real token counts always take priority. For records that contain only credits, **measure your own per-model ratios** to enable token estimates. Without a valid coefficient for a model, its credits are retained but no tokens are estimated.
+Reported token counts always take priority. When tokens are missing, the collector can estimate them from `context_usage_ratio` and **user-measured per-model prices**:
 
-For each model, collect representative records with both credits and real token counts, then calculate `tokensPerCredit = sum(tokens) / sum(credits)`. Do not count cached input twice: Qoder's `input_tokens` already includes `cache_read_input_tokens`. Ratios depend on the model, workload, and cache usage; repeat the measurement when those change.
+```text
+input = context_usage_ratio × effective context window
+credits = freshInputPrice × (input − cacheRead) + outputPrice × output + cacheReadPrice × cacheRead
+```
 
-Create `qoder-coeffs.json` beside `device.json`, or set `TOKSCALE_QODER_COEFFS` to your file's absolute path:
+It resolves window candidates across a continuous session segment, using recorded usage as anchors when available. Model/agent changes, compaction markers, shrinking context ratios and incompatible windows reset the segment. Cache reads and output remain estimates. Missing calibration, missing usage fields or an unresolved window leave credits intact without inventing token counts. **There is no fixed tokens-per-credit fallback.**
+
+Create `qoder-coeffs.json` beside `device.json`, or set `TOKSCALE_QODER_COEFFS` to its absolute path. Only the versioned format is accepted; old `tokensPerCredit` and `pf`/`d` files must be replaced:
 
 ```json
 {
-  "your-model-id": { "tokensPerCredit": 1000 }
+  "schema": "qoder-token-estimates/2",
+  "models": {
+    "your-model-id": {
+      "prices": {
+        "freshInput": 0.001,
+        "output": 0.003,
+        "cacheRead": 0.0001,
+        "creditsField": "original_credits"
+      },
+      "windows": { "observed": [180000] }
+    }
+  }
 }
 ```
 
-`1000` is an illustrative value, **not a measured or recommended coefficient**. Replace it with your result and use the exact model ID from your records. Each ratio must be positive and finite. Restart the collector after configuration; for a service, use the same user/configuration directory or set `TOKSCALE_QODER_COEFFS` in its environment. The old `pf`/`d` format is no longer used.
+**These prices are fictional format examples, not measured or recommended values.** Prices are credits per token, with any markup already included. Fit the three rates from representative records with nonzero token usage, covering cold/cached input and short/long output, then validate on separate requests. Qoder's input count includes cached reads; subtract the cached portion once when fitting fresh-input prices. Never sum cumulative session results repeatedly.
 
-Estimates are recorded as input tokens because the original input/output/cache split is unknown. Keep this file local; it is ignored by Git and is not included in release builds. Removing coefficients can lower previously estimated totals on the next synchronization.
+`creditsField` selects the calibration basis: `original_credits` before discounts, or `credits` after discounts (the default). The collector requires that selected field and never silently substitutes the other one. Credits reported to the server remain the actual `credits` value. `windows.observed` adds measured window candidates; it does not force one window for every session. Optional `meta.aliases` maps display names to exact model IDs. `Auto` is never estimated because it routes across models; its reported tokens are still counted. Other unstable routing aliases should be omitted from calibration.
+
+Keep this file local; measured prices are not bundled in release builds. The collector reloads it on each scan. Use the same user/configuration directory for a background service; if changing `TOKSCALE_QODER_COEFFS`, reinstall the service to capture the environment. Updating calibration can revise historical totals on the next synchronization.
+
+An optional [offline calibration reference](scripts/README.md) fits this format from your own JSONL records and separate validation requests. It contains no measured model list or coefficients, does not call models, and is not bundled with the collector.
 
 ### Run in the background
 

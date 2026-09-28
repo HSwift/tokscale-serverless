@@ -22,7 +22,7 @@ async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let command = args.first().map(String::as_str).unwrap_or("");
     if matches!(command, "--help" | "-h" | "help") {
-        println!("tokscale-client [connect [WORKER_URL] | run | service <COMMAND>]\n\n  connect  Verify and save Worker URL/token (token input is hidden)\n  run      Collect and sync using saved credentials, without prompts\n  service  Install and manage a Linux/macOS background service\n           Commands: install, uninstall, start, stop, restart, status, logs\n\nWith no command, first-time interactive startup offers connection setup.\nConfiguration: {}\nEnvironment variables override saved configuration.", config::connection_path().display());
+        println!("tokscale-client [connect [WORKER_URL] | run | sync [--full] | service <COMMAND>]\n\n  connect  Verify and save Worker URL/token (token input is hidden)\n  run      Collect periodically; upload only changed usage\n  sync     Collect and sync once, then exit; --full resends all local history\n  service  Install and manage a Linux/macOS background service\n           Commands: install, uninstall, start, stop, restart, status, logs\n\nWith no command, first-time interactive startup offers connection setup.\nConfiguration: {}\nEnvironment variables override saved configuration.", config::connection_path().display());
         return;
     }
     if command == "service" {
@@ -39,8 +39,12 @@ async fn main() {
         }
         return;
     }
-    if !matches!(command, "" | "run") || args.len() > 1 {
-        eprintln!("usage: tokscale-client [connect [WORKER_URL] | run | service <COMMAND>]");
+    let once = command == "sync";
+    let full = once && args.get(1).is_some_and(|arg| arg == "--full");
+    if !(once && (args.len() == 1 || (full && args.len() == 2))
+        || matches!(command, "" | "run") && args.len() <= 1)
+    {
+        eprintln!("usage: tokscale-client [connect [WORKER_URL] | run | sync [--full] | service <COMMAND>]");
         std::process::exit(2);
     }
 
@@ -70,6 +74,13 @@ async fn main() {
         std::process::exit(2);
     }
     let device = device::resolve();
+    if once {
+        if let Err(error) = collect_and_sync(&cfg, &device, full, true).await {
+            eprintln!("sync failed: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
     tracing::info!(
@@ -78,7 +89,11 @@ async fn main() {
     );
 
     loop {
-        let cycle = collect_and_sync(&cfg, &device);
+        let cycle = async {
+            if let Err(error) = collect_and_sync(&cfg, &device, false, false).await {
+                tracing::warn!("collection or sync failed: {error}");
+            }
+        };
         tokio::pin!(cycle);
         tokio::select! {
             _ = &mut shutdown => {
@@ -103,20 +118,25 @@ async fn main() {
     tracing::info!("collector stopped");
 }
 
-async fn collect_and_sync(cfg: &config::Config, device: &device::DeviceInfo) {
-    match scan::collect(cfg).await {
-        Ok(snapshot) => {
-            tracing::info!(
-                messages = snapshot.messages.len(),
-                duration_ms = snapshot.scan_duration_ms,
-                "scan complete"
-            );
-            if let Err(error) = sync::push(cfg, device, snapshot).await {
-                tracing::warn!("cloud sync push failed: {error}");
-            }
-        }
-        Err(error) => tracing::error!("scan failed: {error}"),
-    }
+async fn collect_and_sync(
+    cfg: &config::Config,
+    device: &device::DeviceInfo,
+    full: bool,
+    wait_for_lock: bool,
+) -> Result<(), String> {
+    // Lock before scanning: a manual sync must not race a background scan and
+    // overwrite newer data with a snapshot collected before the lock was held.
+    let Some(session) = sync::Session::acquire(wait_for_lock).await? else {
+        tracing::debug!("another sync is running; skipping this scan");
+        return Ok(());
+    };
+    let snapshot = scan::collect(cfg).await?;
+    tracing::info!(
+        messages = snapshot.messages.len(),
+        duration_ms = snapshot.scan_duration_ms,
+        "scan complete"
+    );
+    session.push(cfg, device, snapshot, full).await
 }
 
 async fn shutdown_signal() {

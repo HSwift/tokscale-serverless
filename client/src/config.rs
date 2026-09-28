@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
-pub const DEFAULT_REFRESH_INTERVAL_SECS: u64 = 60;
+pub const DEFAULT_REFRESH_INTERVAL_SECS: u64 = 3600;
 
 /// Persisted alongside device identity, but never included in device exports.
 #[derive(Clone, Deserialize, Serialize)]
@@ -303,7 +303,7 @@ pub(crate) mod tests {
             )
             .unwrap()
             .refresh_interval_secs,
-            60
+            3600
         );
         assert_eq!(
             resolve(Some(&saved()), &[("REFRESH_INTERVAL_SECS", "0")])

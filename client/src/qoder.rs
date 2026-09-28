@@ -1,22 +1,9 @@
-//! Qoder usage lane. tokscale-core has no Qoder parser, and Qoder itself
-//! records usage in two disjoint places depending on install flavour:
-//!
-//! - Desktop/CLI installs: SQLite `local.db` (`chat_message.token_info` JSON
-//!   with `prompt_tokens`/`cached_tokens`/`completion_tokens`). This is the
-//!   only source of *real token counts*; path layout follows TokenTracker's
-//!   cross-platform resolution (intl `Qoder` + CN `QoderCN` editions).
-//! - Headless/agent-runner installs: Claude-shaped transcript JSONL under
-//!   `*/projects/**`. When real usage is absent (recorded before
-//!   `QODER_EXPOSE_TOKEN_USAGE=1`), billable tokens are estimated from
-//!   `usage.credits` only with a user-configured [`CoeffTable`] and flagged
-//!   `CostSource::Estimated`; real metrics always take priority. Credits are
-//!   not USD, so they are reported through [`QoderCredit`] side-band data,
-//!   never through `UnifiedMessage.cost`.
-//!
-//! The same file can appear under several roots, so every emitted row is
-//! deduped by a stable message key across all roots.
+//! Qoder usage from SQLite and recursive transcript JSONL, including subagents.
+//! Reported tokens win. Missing usage can be estimated from context ratios and
+//! user-measured prices; credits alone never become tokens. Credits stay separate
+//! from USD cost. Request IDs deduplicate matching SQLite/transcript records.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OpenFlags};
@@ -24,6 +11,8 @@ use tokscale_core::sessions::{CostSource, UnifiedMessage};
 use tokscale_core::TokenBreakdown;
 
 use crate::coeffs::CoeffTable;
+
+mod estimate;
 
 pub const QODER_CLIENT: &str = "qoder";
 
@@ -40,6 +29,8 @@ pub struct QoderCredit {
 pub struct QoderScan {
     pub messages: Vec<UnifiedMessage>,
     pub credits: Vec<QoderCredit>,
+    message_indexes: HashMap<String, usize>,
+    credit_indexes: HashMap<String, usize>,
 }
 
 pub fn scan(home: &Path, use_env_roots: bool, coeffs: &CoeffTable) -> QoderScan {
@@ -177,7 +168,7 @@ fn blank_message(client: &str) -> UnifiedMessage {
 // ---------- SQLite local.db (real tokens) ----------
 
 const QODER_SQL_WITH_RECORD: &str = "
-SELECT cm.id, cm.session_id, cm.token_info, cm.model_info, cm.gmt_create, cr.extra
+SELECT cm.id, cm.session_id, cm.token_info, cm.model_info, cm.gmt_create, cr.extra, cm.request_id
 FROM chat_message cm
 LEFT JOIN chat_record cr ON cr.request_id = cm.request_id
 WHERE cm.role = 'assistant'
@@ -187,7 +178,7 @@ ORDER BY cm.gmt_create, cm.rowid
 ";
 
 const QODER_SQL_MESSAGE_ONLY: &str = "
-SELECT cm.id, cm.session_id, cm.token_info, cm.model_info, cm.gmt_create, NULL
+SELECT cm.id, cm.session_id, cm.token_info, cm.model_info, cm.gmt_create, NULL, cm.request_id
 FROM chat_message cm
 WHERE cm.role = 'assistant'
   AND cm.token_info IS NOT NULL
@@ -212,7 +203,16 @@ fn parse_db(path: &Path, seen: &mut HashSet<String>, out: &mut QoderScan) {
     } else {
         QODER_SQL_MESSAGE_ONLY
     };
-    let mut stmt = match conn.prepare(sql) {
+    // Message-only databases may not have a request_id column. Keep reading
+    // their real tokens, using the message ID for deduplication in that case.
+    let prepared = conn.prepare(sql).or_else(|error| {
+        if has_chat_record {
+            Err(error)
+        } else {
+            conn.prepare(&QODER_SQL_MESSAGE_ONLY.replace("cm.request_id", "NULL"))
+        }
+    });
+    let mut stmt = match prepared {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!("qoder: query failed on {}: {e}", path.display());
@@ -227,6 +227,7 @@ fn parse_db(path: &Path, seen: &mut HashSet<String>, out: &mut QoderScan) {
             row.get::<_, Option<String>>(3)?,
             row.get::<_, i64>(4)?,
             row.get::<_, Option<String>>(5)?,
+            row.get::<_, Option<String>>(6)?,
         ))
     }) {
         Ok(r) => r,
@@ -236,21 +237,26 @@ fn parse_db(path: &Path, seen: &mut HashSet<String>, out: &mut QoderScan) {
         }
     };
     for row in rows.flatten() {
-        let (id, session_id, token_info, model_info, gmt_create_ms, record_extra) = row;
+        let (id, session_id, token_info, model_info, gmt_create_ms, record_extra, request_id) = row;
         let Some(tokens) = normalize_token_info(&token_info) else {
             continue;
         };
         if tokens.total() == 0 {
             continue;
         }
-        let dedup = format!(
-            "db:{}",
-            if id.is_empty() {
-                format!("{gmt_create_ms}")
-            } else {
-                id.clone()
-            }
-        );
+        let dedup = request_id
+            .filter(|id| !id.is_empty())
+            .map(|id| format!("request:{id}"))
+            .unwrap_or_else(|| {
+                format!(
+                    "db:{}",
+                    if id.is_empty() {
+                        format!("{gmt_create_ms}")
+                    } else {
+                        id.clone()
+                    }
+                )
+            });
         if !seen.insert(dedup.clone()) {
             continue;
         }
@@ -261,7 +267,9 @@ fn parse_db(path: &Path, seen: &mut HashSet<String>, out: &mut QoderScan) {
         msg.timestamp = gmt_create_ms;
         msg.date = local_date(gmt_create_ms);
         msg.tokens = tokens;
-        msg.dedup_key = Some(dedup);
+        msg.cost_source = CostSource::ProviderReported;
+        msg.dedup_key = Some(dedup.clone());
+        out.message_indexes.insert(dedup, out.messages.len());
         out.messages.push(msg);
     }
 }
@@ -311,7 +319,7 @@ fn model_from_db(model_info: Option<&str>, record_extra: Option<&str>) -> String
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-// ---------- Transcript JSONL (credits only; token fields are zeroed) ----------
+// ---------- Transcript JSONL (reported usage or ratio/price estimates) ----------
 
 fn parse_projects(
     dir: &Path,
@@ -341,6 +349,14 @@ fn collect_jsonl(dir: &Path, files: &mut Vec<PathBuf>) {
     }
 }
 
+#[derive(Debug)]
+struct TranscriptRow {
+    message: UnifiedMessage,
+    usage: estimate::Usage,
+    agent: String,
+    key: String,
+}
+
 fn parse_transcript(
     path: &Path,
     seen: &mut HashSet<String>,
@@ -350,102 +366,210 @@ fn parse_transcript(
     let Ok(content) = std::fs::read_to_string(path) else {
         return;
     };
+    let mut rows: Vec<TranscriptRow> = Vec::new();
+    let mut indexes: HashMap<String, usize> = HashMap::new();
+    let mut reset = false;
     for (idx, line) in content.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
         let Ok(rec) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
+        if rec.get("subtype").and_then(|v| v.as_str()) == Some("compact_boundary")
+            || rec.get("isCompactSummary").and_then(|v| v.as_bool()) == Some(true)
+        {
+            reset = true;
+        }
         if rec.get("type").and_then(|t| t.as_str()) != Some("assistant") {
             continue;
         }
         let message = rec.get("message").cloned().unwrap_or_default();
         let usage = message.get("usage").cloned().unwrap_or_default();
-        let credits = usage.get("credits").and_then(|c| c.as_f64()).unwrap_or(0.0);
-        // Transcripts use the same OpenAI-style semantics as the SQLite
-        // token_info: input_tokens includes cache_read_input_tokens. Split
-        // cached input out so TokenBreakdown::total() does not double-count.
-        let cache_read = usage_i64(&usage, "cache_read_input_tokens");
-        let mut tokens = TokenBreakdown {
-            input: (usage_i64(&usage, "input_tokens") - cache_read).max(0),
+        let input = usage_i64(&usage, "input_tokens");
+        let cache_read = usage_i64(&usage, "cache_read_input_tokens").min(input);
+        let tokens = TokenBreakdown {
+            input: input - cache_read,
             output: usage_i64(&usage, "output_tokens"),
             cache_read,
             cache_write: usage_i64(&usage, "cache_creation_input_tokens"),
             reasoning: 0,
         };
-        if credits <= 0.0 && tokens.total() == 0 {
+        let credits = usage_number(&usage, "credits");
+        let original_credits = usage_number(&usage, "original_credits");
+        if tokens.total() == 0
+            && credits.unwrap_or(0.0) <= 0.0
+            && original_credits.unwrap_or(0.0) <= 0.0
+        {
             continue;
         }
-        let session_id = rec
-            .get("sessionId")
-            .and_then(|s| s.as_str())
-            .unwrap_or("")
-            .to_string();
-        let key = message
-            .get("id")
-            .and_then(|s| s.as_str())
-            .or_else(|| rec.get("uuid").and_then(|s| s.as_str()))
-            .map(str::to_string)
-            .unwrap_or_else(|| format!("{session_id}:{idx}"));
-        let dedup = format!("jsonl:{key}");
-        if !seen.insert(dedup.clone()) {
-            continue;
-        }
-        let timestamp_ms = rec
-            .get("timestamp")
-            .and_then(|t| t.as_str())
-            .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
-            .map(|t| t.timestamp_millis())
-            .unwrap_or(0);
         let model = message
             .get("model")
-            .and_then(|m| m.as_str())
-            .unwrap_or("unknown")
+            .and_then(|v| v.as_str())
+            .or_else(|| usage.get("model").and_then(|v| v.as_str()))
+            .unwrap_or("unknown");
+        let key = usage
+            .get("request_id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|id| format!("request:{id}"))
+            .unwrap_or_else(|| {
+                let id = message
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| rec.get("uuid").and_then(|v| v.as_str()))
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("{}:{idx}", path.display()));
+                format!("jsonl:{id}")
+            });
+        let timestamp = rec
+            .get("timestamp")
+            .and_then(|v| v.as_str())
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|t| t.timestamp_millis())
+            .unwrap_or(0);
+        let mut msg = blank_message(QODER_CLIENT);
+        msg.model_id = coeffs.canonical_model(model).to_string();
+        msg.session_id = rec
+            .get("sessionId")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
             .to_string();
-        // Fallback for records that predate real usage recording: derive
-        // tokens from credits only with the user's measured coefficient table.
-        // The cache split is unknowable, so the estimate lands entirely in
-        // uncached input and is flagged CostSource::Estimated.
-        let mut cost_source = CostSource::ProviderReported;
-        if tokens.total() == 0 && credits > 0.0 {
-            if let Some(est) = coeffs.estimate_tokens(&model, credits) {
-                tokens.input = est;
-                cost_source = CostSource::Estimated;
+        msg.workspace_key = rec.get("cwd").and_then(|v| v.as_str()).map(str::to_string);
+        msg.timestamp = timestamp;
+        msg.date = local_date(timestamp);
+        msg.cost_source = if tokens.total() > 0 {
+            CostSource::ProviderReported
+        } else {
+            CostSource::Unknown
+        };
+        msg.tokens = tokens.clone();
+        msg.dedup_key = Some(key.clone());
+        let mut row = TranscriptRow {
+            message: msg,
+            usage: estimate::Usage {
+                tokens,
+                credits,
+                original_credits,
+                ratio: usage_number(&usage, "context_usage_ratio"),
+                reset,
+            },
+            agent: rec
+                .get("agentId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            key: key.clone(),
+        };
+        reset = false;
+        // Streaming fragments can contain the same ID several times. Keep real
+        // usage even if another fragment has credits but zeroed token fields.
+        if let Some(&index) = indexes.get(&key) {
+            let old = &rows[index];
+            row.usage.reset |= old.usage.reset;
+            row.usage.credits = row.usage.credits.or(old.usage.credits);
+            row.usage.original_credits = row.usage.original_credits.or(old.usage.original_credits);
+            row.usage.ratio = row.usage.ratio.or(old.usage.ratio);
+            if row.message.timestamp == 0 {
+                row.message.timestamp = old.message.timestamp;
+                row.message.date.clone_from(&old.message.date);
+            }
+            if old.usage.tokens.total() > 0 && row.usage.tokens.total() == 0 {
+                row.usage.tokens = old.usage.tokens.clone();
+                row.message.tokens = old.message.tokens.clone();
+                row.message.cost_source = CostSource::ProviderReported;
+            }
+            rows[index] = row;
+        } else {
+            indexes.insert(key, rows.len());
+            rows.push(row);
+        }
+    }
+
+    // File order reflects request order even when timestamps are absent. Never
+    // carry a cache chain across sessions, model switches, or subagents.
+    let mut start = 0;
+    while start < rows.len() {
+        let mut end = start + 1;
+        while end < rows.len()
+            && rows[end].message.session_id == rows[start].message.session_id
+            && rows[end].message.model_id == rows[start].message.model_id
+            && rows[end].agent == rows[start].agent
+        {
+            end += 1;
+        }
+        if let Some(model) = coeffs.model(&rows[start].message.model_id) {
+            let usage: Vec<_> = rows[start..end].iter().map(|r| r.usage.clone()).collect();
+            for (row, estimated) in rows[start..end]
+                .iter_mut()
+                .zip(estimate::estimate(&usage, model))
+            {
+                if let Some(tokens) = estimated {
+                    row.message.tokens = tokens;
+                    row.message.cost_source = CostSource::Estimated;
+                }
             }
         }
-        let date = local_date(timestamp_ms);
-        let mut msg = blank_message(QODER_CLIENT);
-        msg.model_id = model.clone();
-        msg.session_id = session_id.clone();
-        msg.workspace_key = rec.get("cwd").and_then(|c| c.as_str()).map(str::to_string);
-        msg.timestamp = timestamp_ms;
-        msg.date = date.clone();
-        msg.tokens = tokens;
-        // Credits stay out of `cost`: they are Qoder plan credits, not USD.
-        msg.cost_source = cost_source;
-        msg.dedup_key = Some(dedup);
-        out.messages.push(msg);
-        if credits > 0.0 {
-            out.credits.push(QoderCredit {
-                date,
-                credits,
-                model_id: model,
-                session_id,
-            });
-        }
+        start = end;
+    }
+    for row in rows {
+        emit_transcript(row, seen, out);
     }
 }
 
+fn emit_transcript(row: TranscriptRow, seen: &mut HashSet<String>, out: &mut QoderScan) {
+    if let Some(credits) = row.usage.credits.filter(|c| *c > 0.0) {
+        let credit = QoderCredit {
+            date: row.message.date.clone(),
+            credits,
+            model_id: row.message.model_id.clone(),
+            session_id: row.message.session_id.clone(),
+        };
+        if let Some(&index) = out.credit_indexes.get(&row.key) {
+            out.credits[index] = credit;
+        } else {
+            out.credit_indexes
+                .insert(row.key.clone(), out.credits.len());
+            out.credits.push(credit);
+        }
+    }
+    if let Some(&index) = out.message_indexes.get(&row.key) {
+        let old = &out.messages[index];
+        if row.message.cost_source == CostSource::ProviderReported
+            || (old.cost_source != CostSource::ProviderReported && row.message.tokens.total() > 0)
+        {
+            out.messages[index] = row.message;
+        }
+    } else if seen.insert(row.key.clone()) {
+        out.message_indexes.insert(row.key, out.messages.len());
+        out.messages.push(row.message);
+    }
+}
+
+fn usage_number(usage: &serde_json::Value, key: &str) -> Option<f64> {
+    usage
+        .get(key)
+        .and_then(|v| v.as_f64())
+        .filter(|v| v.is_finite() && *v >= 0.0)
+}
+
 fn usage_i64(usage: &serde_json::Value, key: &str) -> i64 {
-    usage.get(key).and_then(|v| v.as_i64()).unwrap_or(0)
+    usage.get(key).and_then(|v| v.as_i64()).unwrap_or(0).max(0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::Timelike;
+
+    fn test_coeffs() -> CoeffTable {
+        serde_json::from_str(
+            r#"{
+            "schema":"qoder-token-estimates/2",
+            "models":{"test-model":{
+                "prices":{"freshInput":1,"output":5,"cacheRead":0.1}
+            }}
+        }"#,
+        )
+        .unwrap()
+    }
 
     fn assert_hourly_usage(out: &QoderScan, timestamp_ms: i64, tokens: i64) {
         let expected = chrono::DateTime::from_timestamp_millis(timestamp_ms)
@@ -504,13 +628,13 @@ mod tests {
     #[test]
     fn token_info_separates_cached_without_double_counting() {
         let t = normalize_token_info(
-            r#"{"prompt_tokens":58299,"cached_tokens":57853,"completion_tokens":2812}"#,
+            r#"{"prompt_tokens":12000,"cached_tokens":9000,"completion_tokens":500}"#,
         )
         .unwrap();
-        assert_eq!(t.input, 446);
-        assert_eq!(t.cache_read, 57853);
-        assert_eq!(t.output, 2812);
-        assert_eq!(t.total(), 58299 + 2812);
+        assert_eq!(t.input, 3000);
+        assert_eq!(t.cache_read, 9000);
+        assert_eq!(t.output, 500);
+        assert_eq!(t.total(), 12000 + 500);
     }
 
     #[test]
@@ -573,8 +697,7 @@ mod tests {
 
         let mut out = QoderScan::default();
         let mut seen = HashSet::new();
-        let coeffs: CoeffTable =
-            serde_json::from_str(r#"{"test-model":{"tokensPerCredit":1000}}"#).unwrap();
+        let coeffs: CoeffTable = test_coeffs();
         parse_projects(&dir, &mut seen, &mut out, &coeffs);
         assert_eq!(
             out.messages.len(),
@@ -588,10 +711,9 @@ mod tests {
         assert_eq!(out.messages[0].model_id, "test-model");
         assert_eq!(out.messages[0].cost, 0.0, "credits must not leak into cost");
         assert!(!out.messages[0].date.is_empty());
-        // No real usage recorded: tokens estimated from credits and flagged.
-        assert_eq!(out.messages[0].cost_source, CostSource::Estimated);
-        assert_eq!(out.messages[0].tokens.input, 1500);
-        assert!(out.messages[0].tokens.total() > 0);
+        // Credits alone no longer manufacture token totals, even with prices.
+        assert_eq!(out.messages[0].cost_source, CostSource::Unknown);
+        assert!(out.messages.iter().all(|m| m.tokens.total() == 0));
         let timestamp_ms = chrono::DateTime::parse_from_rfc3339("2026-08-30T11:00:00Z")
             .unwrap()
             .timestamp_millis();
@@ -609,8 +731,7 @@ mod tests {
     fn transcript_splits_cached_input_out_of_input_tokens() {
         let dir = std::env::temp_dir().join(format!("qoder-lane-tok-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        // Shape observed after Qoder started recording real usage (2026-09):
-        // input 25106 includes cache_read 24782 → uncached input is 324.
+        // Synthetic usage: input includes cached reads; subtract them once.
         let record = serde_json::json!({
             "type": "assistant",
             "timestamp": "2026-09-22T02:18:22.123+09:00",
@@ -620,10 +741,10 @@ mod tests {
                 "role": "assistant",
                 "model": "test-model",
                 "usage": {
-                    "input_tokens": 25106,
-                    "cache_read_input_tokens": 24782,
+                    "input_tokens": 10000,
+                    "cache_read_input_tokens": 8000,
                     "cache_creation_input_tokens": 0,
-                    "output_tokens": 104,
+                    "output_tokens": 100,
                     "credits": 0.5
                 }
             }
@@ -631,23 +752,22 @@ mod tests {
         std::fs::write(dir.join("s.jsonl"), serde_json::to_string(&record).unwrap()).unwrap();
         let mut out = QoderScan::default();
         let mut seen = HashSet::new();
-        let coeffs: CoeffTable =
-            serde_json::from_str(r#"{"test-model":{"tokensPerCredit":1000}}"#).unwrap();
+        let coeffs: CoeffTable = test_coeffs();
         parse_projects(&dir, &mut seen, &mut out, &coeffs);
         assert_eq!(out.messages.len(), 1);
         let m = &out.messages[0];
         let t = &m.tokens;
-        assert_eq!(t.input, 324, "real usage must win over credit estimation");
-        assert_eq!(t.cache_read, 24782);
-        assert_eq!(t.output, 104);
-        assert_eq!(t.total(), 25106 + 104);
+        assert_eq!(t.input, 2000, "real usage must win over credit estimation");
+        assert_eq!(t.cache_read, 8000);
+        assert_eq!(t.output, 100);
+        assert_eq!(t.total(), 10000 + 100);
         assert_eq!(m.cost_source, CostSource::ProviderReported);
         assert_eq!(out.credits.len(), 1);
         let timestamp_ms = chrono::DateTime::parse_from_rfc3339("2026-09-21T17:18:22.123Z")
             .unwrap()
             .timestamp_millis();
         assert_eq!(m.timestamp, timestamp_ms);
-        assert_hourly_usage(&out, timestamp_ms, 25106 + 104);
+        assert_hourly_usage(&out, timestamp_ms, 10000 + 100);
         let mut without_coeffs = QoderScan::default();
         parse_projects(
             &dir,
@@ -655,8 +775,8 @@ mod tests {
             &mut without_coeffs,
             &CoeffTable::default(),
         );
-        assert_eq!(without_coeffs.messages[0].tokens.total(), 25106 + 104);
-        assert_hourly_usage(&without_coeffs, timestamp_ms, 25106 + 104);
+        assert_eq!(without_coeffs.messages[0].tokens.total(), 10000 + 100);
+        assert_hourly_usage(&without_coeffs, timestamp_ms, 10000 + 100);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -674,7 +794,7 @@ mod tests {
                 );
                 CREATE TABLE chat_record(request_id TEXT, extra TEXT);
                 INSERT INTO chat_message VALUES
-                    ('a1','s1','r1','assistant','{\"prompt_tokens\":1000,\"cached_tokens\":800,\"completion_tokens\":50}','{\"model_key\":\"quest-ultimate\"}',1784681696263),
+                    ('a1','s1','r1','assistant','{\"prompt_tokens\":1000,\"cached_tokens\":800,\"completion_tokens\":50}','{\"model_key\":\"test-model\"}',1784681696263),
                     ('a2','s1','r1','user',NULL,NULL,1784681697000),
                     ('a3','s1','r2','assistant','{}',NULL,1784681698000);",
             )
@@ -686,7 +806,7 @@ mod tests {
         assert_eq!(out.messages.len(), 1);
         let m = &out.messages[0];
         assert_eq!(m.client, "qoder");
-        assert_eq!(m.model_id, "quest-ultimate");
+        assert_eq!(m.model_id, "test-model");
         assert_eq!(m.tokens.input, 200);
         assert_eq!(m.tokens.cache_read, 800);
         assert_eq!(m.tokens.output, 50);
@@ -694,6 +814,160 @@ mod tests {
         assert!(!m.date.is_empty());
         assert!(out.credits.is_empty());
         assert_hourly_usage(&out, 1784681696263, 1050);
+
+        // A matching API request in JSONL contributes credits without counting
+        // the SQLite tokens for a second time.
+        let transcript = serde_json::json!({
+            "type":"assistant", "sessionId":"s1", "timestamp":"2026-07-22T00:00:00Z",
+            "message":{"id":"other-message-id", "model":"test-model", "usage":{
+                "request_id":"r1", "input_tokens":1000,"output_tokens":50,
+                "cache_read_input_tokens":800,"credits":1.25
+            }}
+        });
+        std::fs::write(dir.join("request.jsonl"), transcript.to_string()).unwrap();
+        parse_transcript(
+            &dir.join("request.jsonl"),
+            &mut seen,
+            &mut out,
+            &CoeffTable::default(),
+        );
+        assert_eq!(out.messages.len(), 1);
+        assert_eq!(out.messages[0].tokens.total(), 1050);
+        assert_eq!(out.credits.len(), 1);
+        assert_eq!(out.credits[0].credits, 1.25);
+        Connection::open(&db_path)
+            .unwrap()
+            .execute_batch(
+                "DROP TABLE chat_record; ALTER TABLE chat_message DROP COLUMN request_id;",
+            )
+            .unwrap();
+        let mut message_only = QoderScan::default();
+        parse_db(&db_path, &mut HashSet::new(), &mut message_only);
+        assert_eq!(message_only.messages.len(), 1);
+        assert_eq!(message_only.messages[0].tokens.total(), 1050);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn ratio_record(id: &str, input: i64, credits: f64) -> serde_json::Value {
+        serde_json::json!({
+            "type":"assistant", "sessionId":"ratio-session", "timestamp":"2026-08-30T11:00:00Z",
+            "message":{"id":id, "model":"test-model", "usage":{
+                "input_tokens":0,"output_tokens":0,"credits":credits,
+                "context_usage_ratio":input as f64 / 400000.0
+            }}
+        })
+    }
+
+    #[test]
+    fn recursively_estimates_subagents_and_exports_hourly_usage() {
+        let dir = crate::config::tests::TestDirectory::new();
+        let subagents = dir.0.join("projects/main-session/subagents");
+        std::fs::create_dir_all(&subagents).unwrap();
+        let records = [
+            ratio_record("a", 7904, 2624.0),
+            ratio_record("b", 8001, 1046.0),
+        ];
+        std::fs::write(
+            subagents.join("agent.jsonl"),
+            records
+                .iter()
+                .map(|r| r.to_string())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
+        let mut out = QoderScan::default();
+        parse_projects(&dir.0, &mut HashSet::new(), &mut out, &test_coeffs());
+        assert_eq!(out.messages.len(), 2);
+        for (message, input) in out.messages.iter().zip([7904, 8001]) {
+            assert_eq!(message.tokens.input + message.tokens.cache_read, input);
+            assert_eq!(message.cost_source, CostSource::Estimated);
+            assert_eq!(message.cost, 0.0);
+        }
+        assert_eq!(out.credits.iter().map(|c| c.credits).sum::<f64>(), 3670.0);
+        assert_hourly_usage(
+            &out,
+            out.messages[0].timestamp,
+            out.messages.iter().map(|m| m.tokens.total()).sum(),
+        );
+    }
+
+    #[test]
+    fn later_reported_usage_replaces_estimates_without_duplicating_credits() {
+        let dir = crate::config::tests::TestDirectory::new();
+        let a = ratio_record("same", 7904, 2624.0);
+        let b = ratio_record("second", 8001, 1046.0);
+        let mut reported = a.clone();
+        reported["message"]["usage"]["input_tokens"] = 7904.into();
+        reported["message"]["usage"]["cache_read_input_tokens"] = 6000.into();
+        reported["message"]["usage"]["output_tokens"] = 24.into();
+        std::fs::write(dir.0.join("a.jsonl"), format!("{a}\n{b}\n{reported}")).unwrap();
+        std::fs::write(dir.0.join("b.jsonl"), format!("{a}\n{b}")).unwrap();
+        let mut out = QoderScan::default();
+        parse_projects(&dir.0, &mut HashSet::new(), &mut out, &test_coeffs());
+        assert_eq!(out.messages.len(), 2);
+        assert_eq!(out.credits.len(), 2);
+        assert_eq!(out.messages[0].tokens.total(), 7928);
+        assert_eq!(out.messages[0].cost_source, CostSource::ProviderReported);
+    }
+
+    #[test]
+    fn does_not_carry_cache_between_agents() {
+        let dir = crate::config::tests::TestDirectory::new();
+        let a = ratio_record("a", 7904, 2624.0);
+        let mut b = ratio_record("b", 8001, 1046.0);
+        b["agentId"] = "different-agent".into();
+        std::fs::write(dir.0.join("agents.jsonl"), format!("{a}\n{b}")).unwrap();
+        let mut out = QoderScan::default();
+        parse_projects(&dir.0, &mut HashSet::new(), &mut out, &test_coeffs());
+        assert_eq!(
+            out.messages[0].tokens.total(),
+            0,
+            "first window stays ambiguous"
+        );
+        assert_ne!(
+            out.messages[1].tokens.cache_read, 7904,
+            "second agent cannot inherit the first agent's prefix"
+        );
+    }
+
+    #[test]
+    fn auto_keeps_reported_usage_and_credits_but_never_estimates() {
+        let dir = crate::config::tests::TestDirectory::new();
+        let coeffs: CoeffTable = serde_json::from_str(
+            r#"{"schema":"qoder-token-estimates/2",
+                "meta":{"aliases":{"Auto":"test-model"}},
+                "models":{"test-model":{"prices":{"freshInput":1,"output":5,"cacheRead":0.1}}}}
+            "#,
+        )
+        .unwrap();
+        let mut rows = [
+            ratio_record("a", 7904, 2624.0),
+            ratio_record("b", 8001, 1046.0),
+            ratio_record("c", 8010, 1060.0),
+        ];
+        for row in &mut rows {
+            row["message"]["model"] = "Auto".into();
+        }
+        rows[2]["message"]["usage"]["input_tokens"] = 8010.into();
+        rows[2]["message"]["usage"]["cache_read_input_tokens"] = 7900.into();
+        rows[2]["message"]["usage"]["output_tokens"] = 32.into();
+        std::fs::write(
+            dir.0.join("auto.jsonl"),
+            rows.iter()
+                .map(|r| r.to_string())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
+        let mut out = QoderScan::default();
+        parse_projects(&dir.0, &mut HashSet::new(), &mut out, &coeffs);
+        assert_eq!(out.messages.len(), 3);
+        assert_eq!(out.messages[0].tokens.total(), 0);
+        assert_eq!(out.messages[1].tokens.total(), 0);
+        assert_eq!(out.messages[2].tokens.total(), 8042);
+        assert_eq!(out.messages[2].cost_source, CostSource::ProviderReported);
+        assert!(out.messages.iter().all(|m| m.model_id == "Auto"));
+        assert_eq!(out.credits.len(), 3);
     }
 }

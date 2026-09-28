@@ -37,7 +37,7 @@ const EXPORT_PAYLOAD = {
 			clients: [
 				{
 					client: "qoder",
-					modelId: "kmodel_latest",
+					modelId: "example-qoder-model-b",
 					providerId: "qoder",
 					tokens: { input: 100 },
 					cost: 0,
@@ -84,7 +84,7 @@ describe("tokscale-serverless worker", () => {
 	it("ingests an export and aggregates it back", async () => {
 		const ingest = await postIngest(EXPORT_PAYLOAD);
 		expect(ingest.status).toBe(200);
-		expect(await ingest.json()).toEqual({ ok: true, days: 2, rows: 3 });
+		expect(await ingest.json()).toMatchObject({ ok: true, days: 2, rows: 3 });
 
 		const summary = await (
 			await SELF.fetch("https://example.com/api/summary", { headers: AUTH })
@@ -136,14 +136,14 @@ describe("tokscale-serverless worker", () => {
 		expect(byId["claude-sonnet-4-5"].tokens).toBe(9000);
 		expect(byId["claude-sonnet-4-5"].client).toBe("claude");
 		expect(byId["gpt-5.4"].tokens).toBe(205);
-		expect(byId["kmodel_latest"].messages).toBe(1);
+		expect(byId["example-qoder-model-b"].messages).toBe(1);
 		const filtered = await (
 			await SELF.fetch("https://example.com/api/models?since=2026-09-22", {
 				headers: AUTH,
 			})
 		).json();
 		expect(filtered.models).toHaveLength(1);
-		expect(filtered.models[0].modelId).toBe("kmodel_latest");
+		expect(filtered.models[0].modelId).toBe("example-qoder-model-b");
 	});
 
 	it("serves per-day series per device and per model via /api/series", async () => {
@@ -154,7 +154,7 @@ describe("tokscale-serverless worker", () => {
 					date: "2026-09-22",
 					totals: {},
 					clients: [
-						{ client: "qoder", modelId: "qmodel", tokens: { input: 50 }, messages: 1 },
+						{ client: "qoder", modelId: "example-qoder-model-a", tokens: { input: 50 }, messages: 1 },
 					],
 				},
 			],
@@ -178,8 +178,8 @@ describe("tokscale-serverless worker", () => {
 			await SELF.fetch("https://example.com/api/series?group=models", { headers: AUTH })
 		).json();
 		expect(byModel.entities[0].key).toBe("claude-sonnet-4-5");
-		const kmodel = byModel.entities.find((e: { key: string }) => e.key === "kmodel_latest");
-		expect(kmodel.days).toEqual([{ date: "2026-09-22", tokens: 100 }]);
+		const qoderModel = byModel.entities.find((e: { key: string }) => e.key === "example-qoder-model-b");
+		expect(qoderModel.days).toEqual([{ date: "2026-09-22", tokens: 100 }]);
 
 		const byClient = await (
 			await SELF.fetch("https://example.com/api/series?group=clients", { headers: AUTH })
@@ -220,6 +220,62 @@ describe("tokscale-serverless worker", () => {
 			(await SELF.fetch("https://example.com/api/summary?since=2026-13-99", { headers: AUTH }))
 				.status,
 		).toBe(400);
+	});
+});
+
+describe("D1 usage reduction", () => {
+	it("skips unchanged writes, including timestamps, and still accepts corrections and heartbeats", async () => {
+		const payload = { ...structuredClone(EXPORT_PAYLOAD), device: { id: "dev_efficient", hostname: "host", name: "original" },
+			hourly: [{ date: "2026-09-22", hour: 8, client: "qoder", modelId: "example-qoder-model-b", tokens: 100 }] };
+		const first = await (await postIngest(payload)).json();
+		expect(first.rowsWritten).toBeGreaterThan(0);
+		for (const table of ["daily_rows", "daily_credits", "hourly_rows"]) {
+			await env.DB.prepare(`UPDATE ${table} SET updated_at = 'baseline' WHERE device_id = ?`).bind(payload.device.id).run();
+		}
+		const repeat = await (await postIngest(payload)).json();
+		expect(repeat.rowsWritten).toBe(0);
+		expect(repeat.rowsRead).toBeGreaterThanOrEqual(0);
+		for (const table of ["daily_rows", "daily_credits", "hourly_rows"]) {
+			const row = await env.DB.prepare(`SELECT COUNT(*) AS changed FROM ${table} WHERE device_id = ? AND updated_at <> 'baseline'`).bind(payload.device.id).first();
+			expect(row!.changed).toBe(0);
+		}
+		// NULL comparisons must detect both filling and clearing optional values.
+		const changed = structuredClone(payload);
+		changed.contributions[1].clients[0].tokens.input = 90;
+		changed.contributions[1].clients[0].providerId = "changed-provider";
+		changed.contributions[1].totals.credits = 0;
+		changed.hourly[0].tokens = 90;
+		changed.device.name = "renamed";
+		expect((await (await postIngest(changed)).json()).rowsWritten).toBeGreaterThan(0);
+		const daily = await env.DB.prepare("SELECT input, provider_id FROM daily_rows WHERE device_id = ? AND date = '2026-09-22'").bind(payload.device.id).first();
+		expect(daily).toMatchObject({ input: 90, provider_id: "changed-provider" });
+		expect((await env.DB.prepare("SELECT credits FROM daily_credits WHERE device_id = ? AND date = '2026-09-22'").bind(payload.device.id).first())!.credits).toBe(0);
+		delete changed.contributions[1].clients[0].providerId;
+		expect((await (await postIngest(changed)).json()).rowsWritten).toBeGreaterThan(0);
+		expect((await env.DB.prepare("SELECT provider_id FROM daily_rows WHERE device_id = ? AND date = '2026-09-22'").bind(payload.device.id).first())!.provider_id).toBeNull();
+		await env.DB.prepare("UPDATE devices SET last_seen = '2000-01-01 00:00:00' WHERE id = ?").bind(payload.device.id).run();
+		expect((await (await postIngest({ device: changed.device, contributions: [] })).json()).rowsWritten).toBeGreaterThan(0);
+	});
+
+	it("returns the same three series from one dashboard query and honors date/device filters", async () => {
+		const deviceId = "dev_dashboard";
+		await postIngest({ ...EXPORT_PAYLOAD, device: { id: deviceId, name: "Dashboard host" } });
+		const query = `deviceId=${deviceId}&since=2026-09-22&until=2026-09-22`;
+		const combined = await (await SELF.fetch(`https://example.com/api/dashboard?${query}`, { headers: AUTH })).json();
+		for (const group of ["devices", "clients", "models"]) {
+			const separate = await (await SELF.fetch(`https://example.com/api/series?group=${group}&${query}`, { headers: AUTH })).json();
+			expect(combined[group]).toEqual(separate);
+		}
+		expect(combined.devices.entities[0].tokens).toBe(100);
+		// Cached results still require authentication on every request.
+		expect((await SELF.fetch(`https://example.com/api/dashboard?${query}`)).status).toBe(401);
+		const corrected = structuredClone(EXPORT_PAYLOAD);
+		corrected.device.id = deviceId;
+		corrected.contributions[1].clients[0].tokens.input = 80;
+		await postIngest(corrected);
+		const updated = await (await SELF.fetch(`https://example.com/api/dashboard?${query}`, { headers: AUTH })).json();
+		expect(updated.devices.entities[0].tokens).toBe(80);
+		expect((await SELF.fetch("https://example.com/api/dashboard?since=bad", { headers: AUTH })).status).toBe(400);
 	});
 });
 

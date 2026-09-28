@@ -9,7 +9,7 @@
 - **跨主机统计**：集中查看多台电脑、开发服务器上的用量，按设备、客户端、模型和日期分析。
 - **当日用量卡片**：按设备、工具或模型显示小时曲线，与热力图保持筛选同步；点击方块可查看其他天。顶部统一切换所有 token 数字的简写或完整显示。使用 React 和 Recharts，与现有深浅主题保持一致。
 - **网页安装入口**：选择系统后下载最新正式版本，或复制安装命令，自动保存连接配置。
-- **自动采集与同步**：首次输入 Worker 地址和 token，验证后保存；后续启动自动读取配置，默认每 60 秒扫描并同步。
+- **自动采集与同步**：首次输入 Worker 地址和 token，验证后保存；后续启动自动读取配置，默认每小时扫描并同步变化的数据。
 - **可自行部署**：API、数据库和控制台运行在自己的 Cloudflare 账号下，通过共享 token 接收设备上报。
 - **多平台采集器**：提供 Linux x86_64、Windows x86_64、macOS Intel 和 Apple Silicon 构建目标。
 - **Qoder 支持**：在上游解析能力之外增加 Qoder 数据源，单独统计 credits，避免与美元费用混合。
@@ -175,6 +175,21 @@ Fork 本仓库。在 Cloudflare 中创建名为 `tokscale-serverless` 的 D1 数
 
 三端都支持使用 `TOKSCALE_CONFIG_DIR` 指定配置目录，使用 `TOKSCALE_HOME` 指定扫描主目录。路径支持中文和空格，建议使用绝对路径；配置变更后重启采集器。`--help` 可查看实际配置位置。
 
+### 增量与全量同步
+
+采集器在 `device.json` 同目录保存 `sync-state.json`。首次全量上传后，只发送变化的日/模型统计、credits 和小时记录；服务器确认成功后才推进锚点。锚点跨重启保留，也能发现旧日期的修正（包括更新 Qoder 系数）。无变化时不上传；空闲扫描最多每小时发送一次设备心跳。采集仍按原配置频率执行。
+
+```sh
+tokscale-client sync         # 同步变化的数据一次，然后退出
+tokscale-client sync --full  # 重新上传全部可用的本地历史，然后退出
+```
+
+清空或恢复 D1、重建云端统计后，执行 `sync --full`。全量同步跳过本地锚点，成功后保存新状态；同一条记录覆盖累计值，不重复累加。缺失本地日志不会删除云端历史。现有 API 已能接收增量数据，无需迁移协议。手动命令应使用与服务相同的用户、配置目录和数据源；进程锁保证手动同步与后台同步串行执行。上传失败时命令以非零状态退出，锚点保持不变。
+
+已有安装会保留 `device.json` 中保存的间隔。改为按小时采集时，将 `refreshIntervalSecs` 设为 `3600` 并重启服务；若服务环境设置了 `REFRESH_INTERVAL_SECS`，也需相应调整。
+
+API 跳过未变化的更新，设备信息不变时最多每小时更新一次心跳。上报响应包含 D1 的 `rowsRead`、`rowsWritten` 计数。控制台按可显示的日期范围，用一次查询取得设备、工具、模型三种视图；统计结果在每个 Worker 实例内缓存最多 5 分钟，实际写入后清除该实例的缓存。缓存仍需先通过鉴权，不增加存储绑定，不同实例之间最多可能有 5 分钟的数据延迟。
+
 ### 环境变量
 
 | 变量 | 用途与默认行为 |
@@ -183,7 +198,7 @@ Fork 本仓库。在 Cloudflare 中创建名为 `tokscale-serverless` 的 D1 数
 | `TOKSCALE_HOME` | 扫描主目录，默认当前用户主目录 |
 | `TOKSCALE_CLIENTS` | 可选，逗号分隔的客户端列表，如 `claude,codex,qoder` |
 | `TOKSCALE_PRICING` | `cached`（默认）、`remote` 或 `off` |
-| `REFRESH_INTERVAL_SECS` | 覆盖采集间隔；首次连接默认 `60`，`0` 表示关闭定时扫描 |
+| `REFRESH_INTERVAL_SECS` | 覆盖采集间隔；首次连接默认 `3600`（1 小时），`0` 表示关闭定时扫描 |
 | `SYNC_URL` / `SYNC_TOKEN` | 覆盖已保存的连接；覆盖 URL 时需同时提供 token；空 `SYNC_URL` 清除本次运行的连接，采集器将无法启动 |
 | `TOKSCALE_USE_ENV_ROOTS` | 默认 `true`；设为 `false` 后忽略客户端来源目录的环境变量覆盖 |
 | `TOKSCALE_DEVICE_ID` / `TOKSCALE_DEVICE_NAME` | 可选，覆盖设备 ID 或显示名称；通常保留自动生成的 ID |
@@ -197,21 +212,41 @@ Qoder 支持系统应用数据目录及 `.qoder/projects` 等会话目录。非�
 
 ### Qoder credits 估算
 
-始终优先使用真实 token 数。对于只有 credits 的记录，必须**自行测量每个模型的系数**才能估算 token。未配置有效系数的模型仍保留 credits，但不估算 token。
+始终优先使用记录中的真实 token。缺少 token 时，采集器根据 `context_usage_ratio` 和**用户实测的模型分项单价**估算：
 
-按模型收集多条同时包含 credits 和真实 token 数的代表性记录，计算 `tokensPerCredit = token 总数 / credits 总数`。不要重复计算缓存输入：Qoder 的 `input_tokens` 已包含 `cache_read_input_tokens`。系数受模型、任务和缓存命中情况影响，发生变化后应重新测量。
+```text
+输入量 = context_usage_ratio × 有效上下文窗口
+credits = 新输入单价 × (输入量 − 缓存读取) + 输出单价 × 输出量 + 缓存单价 × 缓存读取
+```
 
-在 `device.json` 同目录创建 `qoder-coeffs.json`，或用 `TOKSCALE_QODER_COEFFS` 指定文件的绝对路径：
+采集器在连续会话片段中联合筛选窗口，有真实记录时用其确定窗口。模型或子代理变化、压缩标记、上下文比例下降、窗口候选冲突都会重新分段。缓存和输出拆分仍是估算；缺少配置、字段或无法确定窗口时，只保留 credits，不生成 token 估算。**不再使用固定 tokens-per-credit 系数回退。**
+
+在 `device.json` 同目录创建 `qoder-coeffs.json`，或用 `TOKSCALE_QODER_COEFFS` 指定其绝对路径。仅接受带版本的新格式，旧的 `tokensPerCredit` 和 `pf`/`d` 文件必须替换：
 
 ```json
 {
-  "your-model-id": { "tokensPerCredit": 1000 }
+  "schema": "qoder-token-estimates/2",
+  "models": {
+    "your-model-id": {
+      "prices": {
+        "freshInput": 0.001,
+        "output": 0.003,
+        "cacheRead": 0.0001,
+        "creditsField": "original_credits"
+      },
+      "windows": { "observed": [180000] }
+    }
+  }
 }
 ```
 
-`1000` **只是格式示例，不是实测值或推荐值**。请换成自己的测量结果，模型 ID 必须与记录完全一致，系数必须为有限正数。配置后重启采集器；作为服务运行时，使用相同用户和配置目录，或在服务环境中设置 `TOKSCALE_QODER_COEFFS`。旧的 `pf`/`d` 格式不再使用。
+**以上单价只是虚构的格式示例，不是实测值或推荐值。** 单位为 credits/token，数值应已包含倍率。用非零真实 token 的代表性记录拟合三项单价，覆盖冷输入、缓存命中、长短输出，并用独立请求验证。Qoder 输入量已包含缓存读取，拟合新输入单价时只减去一次缓存。不要反复累加会话累计结果。
 
-由于无法还原输入、输出和缓存的比例，估算值统一记入输入 token。系数文件只保留在本机，已加入 Git 忽略规则，不会打包进发布程序。移除系数后，下一次同步可能降低此前估算的用量。
+`creditsField` 指定标定口径：折扣前的 `original_credits`，或折扣后的 `credits`（默认）。采集器必须读到对应字段，不会拿另一个字段替代；上报到服务器的 credits 始终保留实际 `credits` 值。`windows.observed` 用于补充实测窗口候选，不会强制所有会话使用同一窗口。可选 `meta.aliases` 将显示名称映射到准确的模型 ID；`Auto` 后面有多个模型路由，因此始终不估算，其真实 token 仍正常统计；其他单价不稳定的档位也应不配置估算。
+
+系数文件仅保留在本机，不包含在发布程序中。采集器每次扫描都会重新读取；后台服务应使用相同用户和配置目录，更改 `TOKSCALE_QODER_COEFFS` 后重新安装服务以记录环境。更新标定数据后，下一次同步会相应修正历史统计。
+
+可选的[离线测量参考](scripts/README_CN.md)可以用自己的 JSONL 和独立验证请求拟合此格式。脚本不包含实测模型清单或系数，不自动调用模型，也不打包进采集器。
 
 ### 后台运行
 

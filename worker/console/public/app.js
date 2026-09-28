@@ -73,7 +73,9 @@ async function fetchJSON(path, options) {
 			const body = await res.json();
 			if (body?.error?.message) detail = body.error.message;
 		} catch { /* keep status */ }
-		throw new Error(detail);
+		const error = new Error(detail);
+		error.status = res.status;
+		throw error;
 	}
 	return res.json();
 }
@@ -612,11 +614,21 @@ async function boot() {
 	bindTooltip($("#grid"));
 	bindTooltip($("#iso"));
 	try {
-		const [devices, models, clients] = await Promise.all([
-			fetchJSON("/api/series?group=devices"),
-			fetchJSON("/api/series?group=models"),
-			fetchJSON("/api/series?group=clients"),
-		]);
+		// One request covers all views and only the dates this UI can display.
+		const visible = windowFor("year");
+		const query = new URLSearchParams({ since: toKey(new Date(visible.start)), until: toKey(new Date(visible.end)) });
+		let data;
+		try {
+			data = await fetchJSON(`/api/dashboard?${query}`);
+		} catch (error) {
+			// Console and API builds can finish in either order. Only an older
+			// API's missing route uses the fallback; do not multiply quota errors.
+			if (error.status !== 404) throw error;
+			const groups = ["devices", "models", "clients"];
+			const values = await Promise.all(groups.map(group => fetchJSON(`/api/series?group=${group}&${query}`)));
+			data = Object.fromEntries(groups.map((group, index) => [group, values[index]]));
+		}
+		const { devices, models, clients } = data;
 		state.series.devices = devices;
 		state.series.models = models;
 		state.series.clients = clients;

@@ -1,22 +1,72 @@
-//! User-measured Qoder token/credit ratios, used only when real usage is absent.
-//! No coefficients are bundled. Load the user's JSON file from
-//! `TOKSCALE_QODER_COEFFS` or the configuration directory's `qoder-coeffs.json`.
-//! Missing configuration or an unconfigured model disables token estimation;
-//! credits and provider-reported tokens are still collected.
+//! User-measured Qoder prices and context-window observations.
+//! Only the versioned ratio/price format is accepted. No measured data is bundled.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Copy, serde::Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ModelCoeff {
-    pub tokens_per_credit: f64,
+#[derive(Debug, Clone, Copy, Default, serde::Deserialize)]
+pub enum Schema {
+    #[default]
+    #[serde(rename = "qoder-token-estimates/2")]
+    V2,
+}
+
+#[derive(Debug, Clone, Copy, Default, serde::Deserialize)]
+pub enum CreditsField {
+    #[default]
+    #[serde(rename = "credits")]
+    Billed,
+    #[serde(rename = "original_credits")]
+    Original,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Prices {
+    pub fresh_input: f64,
+    pub output: f64,
+    pub cache_read: f64,
+    #[serde(default)]
+    pub credits_field: CreditsField,
+}
+
+impl Prices {
+    fn valid(&self) -> bool {
+        self.fresh_input.is_finite()
+            && self.fresh_input > 0.0
+            && self.output.is_finite()
+            && self.output > 0.0
+            && self.cache_read.is_finite()
+            && self.cache_read >= 0.0
+    }
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]
-#[serde(transparent)]
+pub struct Windows {
+    #[serde(default)]
+    pub observed: Vec<u64>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ModelCoeff {
+    pub prices: Prices,
+    #[serde(default)]
+    pub windows: Windows,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct Metadata {
+    #[serde(default)]
+    pub aliases: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct CoeffTable {
-    map: HashMap<String, ModelCoeff>,
+    // Required when deserializing: an old flat map must never enable estimation.
+    pub schema: Schema,
+    models: HashMap<String, ModelCoeff>,
+    #[serde(default)]
+    meta: Metadata,
 }
 
 impl CoeffTable {
@@ -32,32 +82,38 @@ impl CoeffTable {
             .and_then(|s| serde_json::from_str::<Self>(&s).map_err(|e| e.to_string()))
         {
             Ok(table) => {
-                tracing::info!(path = %path.display(), entries = table.map.len(), "loaded user Qoder coefficients");
+                tracing::info!(path = %path.display(), entries = table.models.len(), schema = ?table.schema, "loaded user Qoder calibration");
                 table
             }
             Err(error) => {
-                tracing::warn!(path = %path.display(), %error, "Qoder estimation disabled; provide model entries with tokensPerCredit");
+                tracing::warn!(path = %path.display(), %error, "Qoder estimation disabled; expected qoder-token-estimates/2 with per-model prices");
                 Self::default()
             }
         }
     }
 
-    /// Estimate tokens only with a user-supplied, positive finite ratio.
-    /// The estimate cannot know the cache split, so callers put it all in
-    /// uncached input.
-    pub fn estimate_tokens(&self, model: &str, credits: f64) -> Option<i64> {
-        if !credits.is_finite() || credits <= 0.0 {
+    pub fn model(&self, model: &str) -> Option<&ModelCoeff> {
+        if model.eq_ignore_ascii_case("auto")
+            || self.canonical_model(model).eq_ignore_ascii_case("auto")
+        {
             return None;
         }
-        let coeff = self.map.get(model)?;
-        if !coeff.tokens_per_credit.is_finite() || coeff.tokens_per_credit <= 0.0 {
-            return None;
+        self.models
+            .get(self.canonical_model(model))
+            .filter(|m| m.prices.valid())
+    }
+
+    pub fn canonical_model<'a>(&'a self, model: &'a str) -> &'a str {
+        // Routing cannot be turned into one priced model through an alias.
+        if model.eq_ignore_ascii_case("auto") {
+            return model;
         }
-        let tokens = (credits * coeff.tokens_per_credit).round();
-        if !tokens.is_finite() || tokens >= i64::MAX as f64 {
-            return None;
-        }
-        Some(tokens as i64)
+        self.meta
+            .aliases
+            .get(model)
+            .filter(|id| self.models.contains_key(*id))
+            .map(String::as_str)
+            .unwrap_or(model)
     }
 }
 
@@ -74,48 +130,69 @@ mod tests {
     use super::*;
 
     #[test]
-    fn estimates_only_from_user_configuration() {
-        let dir = crate::config::tests::TestDirectory::new();
-        let path = dir.0.join("qoder-coeffs.json");
-        std::fs::write(&path, r#"{"test-model":{"tokensPerCredit":1000}}"#).unwrap();
-        let table = CoeffTable::from_path(&path);
-        assert_eq!(table.estimate_tokens("test-model", 1.5), Some(1500));
-        assert_eq!(table.estimate_tokens("test-model", 0.0015), Some(2));
-        assert_eq!(table.estimate_tokens("unconfigured-model", 1.0), None);
-        assert_eq!(
-            CoeffTable::default().estimate_tokens("test-model", 1.0),
-            None
-        );
+    fn accepts_versioned_prices_and_exact_aliases() {
+        let table: CoeffTable = serde_json::from_str(
+            r#"{
+              "schema":"qoder-token-estimates/2",
+              "meta":{"aliases":{"Test Model":"test"}},
+              "models":{"test":{
+                "prices":{"freshInput":0.001,"output":0.003,"cacheRead":0.0001,"creditsField":"original_credits"},
+                "windows":{"observed":[180000]},
+                "calibration":{"samples":10}
+              }}
+            }"#,
+        )
+        .unwrap();
+        let model = table.model("Test Model").unwrap();
+        assert_eq!(model.windows.observed, [180000]);
+        assert!(matches!(model.prices.credits_field, CreditsField::Original));
+        assert!(table.model("unknown").is_none());
     }
 
     #[test]
-    fn missing_invalid_or_old_format_files_do_not_enable_estimation() {
+    fn rejects_legacy_and_unrecognized_schemas() {
+        for json in [
+            r#"{"test":{"tokensPerCredit":1000}}"#,
+            r#"{"test":{"pf":1,"d":0}}"#,
+            r#"{"schema":"qoder-token-estimates/1","models":{}}"#,
+            r#"{"schema":"qoder-token-estimates/2","models":{"test":{"tokensPerCredit":1000}}}"#,
+        ] {
+            assert!(serde_json::from_str::<CoeffTable>(json).is_err());
+        }
         let dir = crate::config::tests::TestDirectory::new();
         let path = dir.0.join("qoder-coeffs.json");
-        assert!(CoeffTable::from_path(&path).map.is_empty());
-        for contents in ["not json", r#"{"test-model":{"pf":1,"d":0}}"#] {
-            std::fs::write(&path, contents).unwrap();
-            assert!(CoeffTable::from_path(&path).map.is_empty());
-        }
+        std::fs::write(&path, r#"{"test":{"tokensPerCredit":1000}}"#).unwrap();
+        assert!(CoeffTable::from_path(&path).model("test").is_none());
     }
 
     #[test]
-    fn invalid_values_cannot_produce_estimates() {
-        for ratio in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::MAX] {
-            let table = CoeffTable {
-                map: HashMap::from([(
-                    "test-model".to_string(),
-                    ModelCoeff {
-                        tokens_per_credit: ratio,
-                    },
-                )]),
-            };
-            assert_eq!(table.estimate_tokens("test-model", 2.0), None);
+    fn auto_routing_never_uses_a_price_estimate() {
+        let table: CoeffTable = serde_json::from_str(
+            r#"{"schema":"qoder-token-estimates/2","models":{"auto":{
+              "prices":{"freshInput":1,"output":2,"cacheRead":0.1}
+            }}}"#,
+        )
+        .unwrap();
+        assert!(table.model("auto").is_none());
+        assert!(table.model("Auto").is_none());
+    }
+
+    #[test]
+    fn invalid_prices_cannot_enable_estimates() {
+        let mut table: CoeffTable = serde_json::from_str(
+            r#"{"schema":"qoder-token-estimates/2","models":{"test":{
+              "prices":{"freshInput":1,"output":2,"cacheRead":0.1}
+            }}}"#,
+        )
+        .unwrap();
+        for value in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            table.models.get_mut("test").unwrap().prices.output = value;
+            assert!(table.model("test").is_none());
         }
-        let table: CoeffTable =
-            serde_json::from_str(r#"{"test-model":{"tokensPerCredit":1000}}"#).unwrap();
-        for credits in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::MAX] {
-            assert_eq!(table.estimate_tokens("test-model", credits), None);
-        }
+        table.models.get_mut("test").unwrap().prices.output = 2.0;
+        table.models.get_mut("test").unwrap().prices.cache_read = -0.1;
+        assert!(table.model("test").is_none());
+        table.models.get_mut("test").unwrap().prices.cache_read = 0.0;
+        assert!(table.model("test").is_some());
     }
 }

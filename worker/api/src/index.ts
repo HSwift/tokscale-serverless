@@ -16,6 +16,7 @@ import {
 	type Env,
 } from "./auth";
 import { installerScript, releases } from "./install";
+import { cachedRead, invalidateReads } from "./read-cache";
 
 interface TsTokenBreakdown {
 	input?: number;
@@ -149,7 +150,12 @@ async function ingest(request: Request, env: Env): Promise<Response> {
 			   hostname = excluded.hostname,
 			   os = excluded.os,
 			   arch = excluded.arch,
-			   last_seen = datetime('now')`,
+			   last_seen = datetime('now')
+			 WHERE devices.name IS NOT excluded.name
+			    OR devices.hostname IS NOT excluded.hostname
+			    OR devices.os IS NOT excluded.os
+			    OR devices.arch IS NOT excluded.arch
+			    OR devices.last_seen <= datetime('now', '-1 hour')`,
 		).bind(
 			device.id,
 			device.name ?? null,
@@ -188,7 +194,16 @@ async function ingest(request: Request, env: Env): Promise<Response> {
 					   cost = excluded.cost,
 					   messages = excluded.messages,
 					   cost_is_complete = excluded.cost_is_complete,
-					   updated_at = datetime('now')`,
+					   updated_at = datetime('now')
+					 WHERE daily_rows.provider_id IS NOT excluded.provider_id
+					    OR daily_rows.input IS NOT excluded.input
+					    OR daily_rows.output IS NOT excluded.output
+					    OR daily_rows.cache_read IS NOT excluded.cache_read
+					    OR daily_rows.cache_write IS NOT excluded.cache_write
+					    OR daily_rows.reasoning IS NOT excluded.reasoning
+					    OR daily_rows.cost IS NOT excluded.cost
+					    OR daily_rows.messages IS NOT excluded.messages
+					    OR daily_rows.cost_is_complete IS NOT excluded.cost_is_complete`,
 				).bind(
 					device.id,
 					date,
@@ -213,7 +228,8 @@ async function ingest(request: Request, env: Env): Promise<Response> {
 					 VALUES (?, ?, ?, datetime('now'))
 					 ON CONFLICT(device_id, date) DO UPDATE SET
 					   credits = excluded.credits,
-					   updated_at = datetime('now')`,
+					   updated_at = datetime('now')
+					 WHERE daily_credits.credits IS NOT excluded.credits`,
 				).bind(device.id, date, num(day.totals.credits)),
 			);
 		}
@@ -231,16 +247,29 @@ async function ingest(request: Request, env: Env): Promise<Response> {
 			stmts.push(env.DB.prepare(`INSERT INTO hourly_rows
 				(device_id, date, hour, client, model_id, tokens) VALUES (?, ?, ?, ?, ?, ?)
 				ON CONFLICT(device_id, date, hour, client, model_id) DO UPDATE SET
-				tokens = excluded.tokens, updated_at = datetime('now')`)
+				tokens = excluded.tokens, updated_at = datetime('now')
+				WHERE hourly_rows.tokens IS NOT excluded.tokens`)
 				.bind(device.id, row.date, row.hour, row.client, row.modelId, row.tokens));
 		}
 	}
 
 	// Bound batch size for full-history resends.
-	for (let i = 0; i < stmts.length; i += 100) {
-		await env.DB.batch(stmts.slice(i, i + 100));
+	let rowsRead = 0, rowsWritten = 0;
+	try {
+		for (let i = 0; i < stmts.length; i += 100) {
+			const results = await env.DB.batch(stmts.slice(i, i + 100));
+			for (const result of results) {
+				rowsRead += result.meta.rows_read;
+				rowsWritten += result.meta.rows_written;
+			}
+		}
+	} catch (error) {
+		// A failed response may still follow a committed earlier batch.
+		invalidateReads(env);
+		throw error;
 	}
-	return json({ ok: true, days, rows });
+	if (rowsWritten > 0) invalidateReads(env);
+	return json({ ok: true, days, rows, rowsRead, rowsWritten });
 }
 
 interface Filters {
@@ -428,6 +457,41 @@ interface SeriesEntity {
 	days: { date: string; tokens: number }[];
 }
 
+// Read each daily row once, then derive all three console views in memory.
+async function dashboard(url: URL, env: Env): Promise<Response> {
+	const f = filters(url);
+	if (f instanceof Response) return f;
+	const result = await env.DB.prepare(`SELECT r.device_id, r.client, r.model_id, r.date,
+		COALESCE(d.name, d.hostname, r.device_id) AS device_label,
+		(r.input + r.output + r.cache_read + r.cache_write + r.reasoning) AS tokens
+		FROM daily_rows r LEFT JOIN devices d ON d.id = r.device_id
+		${f.where} ORDER BY r.date`).bind(...f.binds)
+		.all<{ device_id: string; device_label: string; client: string; model_id: string; date: string; tokens: number }>();
+	const groups = {
+		devices: new Map<string, { label: string; tokens: number; days: Map<string, number> }>(),
+		clients: new Map<string, { label: string; tokens: number; days: Map<string, number> }>(),
+		models: new Map<string, { label: string; tokens: number; days: Map<string, number> }>(),
+	};
+	for (const row of result.results) {
+		for (const [group, key, label] of [
+			["devices", row.device_id, row.device_label],
+			["clients", row.client, row.client],
+			["models", row.model_id, row.model_id],
+		] as const) {
+			let entity = groups[group].get(key);
+			if (!entity) { entity = { label, tokens: 0, days: new Map() }; groups[group].set(key, entity); }
+			entity.tokens += row.tokens;
+			entity.days.set(row.date, (entity.days.get(row.date) ?? 0) + row.tokens);
+		}
+	}
+	return json(Object.fromEntries(Object.entries(groups).map(([group, entities]) => [group, {
+		group,
+		entities: [...entities].map(([key, value]) => ({ key, label: value.label, tokens: value.tokens,
+			days: [...value.days].map(([date, tokens]) => ({ date, tokens })),
+		})).sort((a, b) => b.tokens - a.tokens || a.key.localeCompare(b.key)),
+	}])));
+}
+
 // Per-day token series per device or per model — feeds the console heatmap's
 // entity switcher without shipping raw rows to the browser.
 async function series(url: URL, env: Env): Promise<Response> {
@@ -502,17 +566,19 @@ export default {
 			case "/api/me":
 				return json({ actor: auth.actor });
 			case "/api/summary":
-				return summary(url, env);
+				return cachedRead(env, url, () => summary(url, env));
 			case "/api/daily":
-				return daily(url, env);
+				return cachedRead(env, url, () => daily(url, env));
 			case "/api/hourly":
-				return hourly(url, env);
+				return cachedRead(env, url, () => hourly(url, env));
 			case "/api/models":
-				return models(url, env);
+				return cachedRead(env, url, () => models(url, env));
 			case "/api/series":
-				return series(url, env);
+				return cachedRead(env, url, () => series(url, env));
+			case "/api/dashboard":
+				return cachedRead(env, url, () => dashboard(url, env));
 			case "/api/devices":
-				return devices(env);
+				return cachedRead(env, url, () => devices(env));
 			default:
 				return error(404, "not_found", "unknown route");
 		}

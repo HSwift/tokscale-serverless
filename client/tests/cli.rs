@@ -77,7 +77,7 @@ fn help_resolves_unicode_configuration_directory_and_run_never_prompts() {
     assert!(String::from_utf8_lossy(&result.stdout)
         .contains(&workspace.device_path().display().to_string()));
     assert!(!workspace.device_path().exists());
-    for args in [vec![], vec!["run"]] {
+    for args in [vec![], vec!["run"], vec!["sync"], vec!["sync", "--full"]] {
         let result = workspace.command().args(args).output().unwrap();
         assert_eq!(result.status.code(), Some(2));
         assert!(String::from_utf8_lossy(&result.stderr).contains("connect"));
@@ -186,7 +186,7 @@ async fn connection_rotation_restart_and_periodic_collection_across_platforms() 
         project.join("session.jsonl"),
         json!({
             "type":"assistant", "timestamp":"2026-09-21T17:18:22Z", "sessionId":"test-session",
-            "message":{"id":"message-1", "role":"assistant", "model":"qmodel", "usage":{
+            "message":{"id":"message-1", "role":"assistant", "model":"example-qoder-model", "usage":{
                 "input_tokens":100, "output_tokens":10, "cache_read_input_tokens":20, "credits":0.1
             }}
         })
@@ -237,6 +237,9 @@ async fn connection_rotation_restart_and_periodic_collection_across_platforms() 
     let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     for periodic in [true, true, false] {
         let before = received.lock().unwrap().len();
+        // Each round starts without an anchor; restart persistence is exercised
+        // separately by the one-shot sync test below.
+        let _ = std::fs::remove_file(workspace.device_path().with_file_name("sync-state.json"));
         let mut command = workspace.command();
         command
             .arg("run")
@@ -252,7 +255,7 @@ async fn connection_rotation_restart_and_periodic_collection_across_platforms() 
                 .unwrap(),
         );
         tokio::time::timeout(Duration::from_secs(30), async {
-            let expected = before + if periodic { 2 } else { 1 };
+            let expected = before + if before == 0 { 2 } else { 1 };
             while received.lock().unwrap().len() < expected {
                 assert!(
                     client.0.try_wait().unwrap().is_none(),
@@ -262,14 +265,15 @@ async fn connection_rotation_restart_and_periodic_collection_across_platforms() 
             }
         })
         .await
-        .expect("collector did not upload initial and periodic scans");
+        .expect("collector did not upload or retry the initial scan");
         #[cfg(target_os = "linux")]
         assert_no_listening_sockets(client.0.id());
-        if !periodic {
-            tokio::time::sleep(Duration::from_millis(1200)).await;
-            assert_eq!(received.lock().unwrap().len(), before + 1);
-            assert!(client.0.try_wait().unwrap().is_none());
-        }
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        assert_eq!(
+            received.lock().unwrap().len(),
+            before + if before == 0 { 2 } else { 1 }
+        );
+        assert!(client.0.try_wait().unwrap().is_none());
         #[cfg(unix)]
         {
             assert!(Command::new("kill")
@@ -311,7 +315,7 @@ async fn connection_rotation_restart_and_periodic_collection_across_platforms() 
         assert_eq!(payload["hourly"].as_array().unwrap().len(), 1);
         assert_eq!(payload["hourly"][0]["tokens"], 110);
         assert_eq!(payload["hourly"][0]["client"], "qoder");
-        assert_eq!(payload["hourly"][0]["modelId"], "qmodel");
+        assert_eq!(payload["hourly"][0]["modelId"], "example-qoder-model");
         assert_eq!(
             payload["meta"]["dateRange"]["start"],
             payload["contributions"][0]["date"]
@@ -323,6 +327,89 @@ async fn connection_rotation_restart_and_periodic_collection_across_platforms() 
         assert!(!payload.to_string().contains("rotated-token"));
         assert!(payload["device"].get("syncToken").is_none());
     }
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_shot_sync_reuses_anchor_and_full_resends_history() {
+    let received: Arc<Mutex<Vec<Value>>> = Arc::default();
+    let uploads = received.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/api/ingest", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new().route(
+                "/api/ingest",
+                post(move |Json(body): Json<Value>| {
+                    let uploads = uploads.clone();
+                    async move {
+                        uploads.lock().unwrap().push(body);
+                        Json(json!({"ok":true}))
+                    }
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+    });
+    let workspace = Workspace::new();
+    std::fs::create_dir_all(workspace.device_path().parent().unwrap()).unwrap();
+    std::fs::write(
+        workspace.device_path(),
+        json!({
+            "id":"dev_sync", "createdAt":"2026-09-01T00:00:00Z",
+            "syncUrl":url, "syncToken":"test-token", "refreshIntervalSecs":60
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let project = workspace.0.join("data/.qoder/projects/test");
+    std::fs::create_dir_all(&project).unwrap();
+    let write_usage = |input: i64| {
+        let rows = [
+            ("2026-09-21T12:00:00Z", "old", input),
+            ("2026-09-22T12:00:00Z", "new", 100),
+        ];
+        std::fs::write(project.join("session.jsonl"), rows.into_iter().map(|(timestamp, id, input)| json!({
+            "type":"assistant", "timestamp":timestamp, "sessionId":"test",
+            "message":{"id":id, "model":"test-model", "usage":{"input_tokens":input,"output_tokens":10}}
+        }).to_string()).collect::<Vec<_>>().join("\n")).unwrap();
+    };
+    let sync = |args: &[&str]| {
+        let output = workspace.command().args(args).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    };
+    write_usage(100);
+    sync(&["sync"]);
+    assert_eq!(received.lock().unwrap().len(), 1);
+    assert!(workspace
+        .device_path()
+        .with_file_name("sync-state.json")
+        .is_file());
+    let skipped = sync(&["sync"]);
+    assert!(String::from_utf8_lossy(&skipped.stdout).contains("usage unchanged"));
+    assert_eq!(received.lock().unwrap().len(), 1);
+    write_usage(90); // A correction to an older day must not be missed.
+    sync(&["sync"]);
+    sync(&["sync", "--full"]);
+    let uploads = received.lock().unwrap();
+    assert_eq!(uploads.len(), 3);
+    assert_eq!(uploads[0]["contributions"].as_array().unwrap().len(), 2);
+    assert_eq!(uploads[1]["contributions"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        uploads[1]["contributions"][0]["clients"][0]["tokens"]["input"],
+        90
+    );
+    assert_eq!(uploads[1]["hourly"].as_array().unwrap().len(), 1);
+    assert_eq!(uploads[1]["hourly"][0]["tokens"], 100);
+    assert_eq!(uploads[2]["contributions"].as_array().unwrap().len(), 2);
+    assert_eq!(uploads[2]["hourly"].as_array().unwrap().len(), 2);
     server.abort();
 }
 

@@ -46,6 +46,9 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      - name: Test calibration reference with synthetic data
+        run: python3 -m unittest discover -s scripts -p 'test_*.py'
+
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:

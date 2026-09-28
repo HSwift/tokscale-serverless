@@ -5,3 +5,7 @@
 !**/.dev.vars.example
 .DS_Store
 qoder-coeffs.json
+sync-state.json
+sync.lock
+**/__pycache__/
+/qoder-calibration/
