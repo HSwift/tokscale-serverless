@@ -153,6 +153,55 @@ pub struct TsHourlyContribution {
     pub tokens: i64,
 }
 
+/// Match the API's wire checks without dropping or repairing suspect records.
+/// At most 20 examples are included; indices refer to this payload's arrays.
+pub fn validation_issues(payload: &TsExport) -> Vec<serde_json::Value> {
+    let valid_date = |date: &str| {
+        date.len() == 10
+            && chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").is_ok()
+            && date.as_bytes()[4] == b'-'
+            && date.as_bytes()[7] == b'-'
+            && date
+                .bytes()
+                .enumerate()
+                .all(|(i, b)| i == 4 || i == 7 || b.is_ascii_digit())
+    };
+    let mut issues = Vec::new();
+    if payload.device.id.trim().is_empty() {
+        issues.push(serde_json::json!({"path":"device.id","reason":"must be a nonempty string"}));
+    }
+    for (i, day) in payload.contributions.iter().enumerate() {
+        if issues.len() >= 20 {
+            break;
+        }
+        if !valid_date(&day.date) {
+            issues.push(serde_json::json!({"path":format!("contributions[{i}].date"),"reason":"invalid calendar date","date":day.date}));
+        }
+    }
+    for (i, row) in payload.hourly.iter().enumerate() {
+        if issues.len() >= 20 {
+            break;
+        }
+        let field = if !valid_date(&row.date) {
+            Some("date")
+        } else if row.hour > 23 {
+            Some("hour")
+        } else if row.client.is_empty() {
+            Some("client")
+        } else if row.model_id.is_empty() {
+            Some("modelId")
+        } else if !(0..=9_007_199_254_740_991).contains(&row.tokens) {
+            Some("tokens")
+        } else {
+            None
+        };
+        if let Some(field) = field {
+            issues.push(serde_json::json!({"path":format!("hourly[{i}].{field}"),"reason":"invalid hourly field","record":row}));
+        }
+    }
+    issues
+}
+
 /// Use the same local calendar as tokscale-core's daily aggregation. Missing
 /// timestamps stay out of hourly data rather than inventing a midnight spike.
 pub fn aggregate_hourly(messages: &[UnifiedMessage]) -> Vec<TsHourlyContribution> {

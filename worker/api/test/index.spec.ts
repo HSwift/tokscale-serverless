@@ -2,6 +2,7 @@ import { env, SELF } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import schema from "../migrations/0001_init.sql?raw";
 import hourlySchema from "../migrations/0002_hourly_and_install.sql?raw";
+import worker from "../src/index";
 
 const AUTH = { Authorization: "Bearer test-token" };
 
@@ -276,6 +277,48 @@ describe("D1 usage reduction", () => {
 		const updated = await (await SELF.fetch(`https://example.com/api/dashboard?${query}`, { headers: AUTH })).json();
 		expect(updated.devices.entities[0].tokens).toBe(80);
 		expect((await SELF.fetch("https://example.com/api/dashboard?since=bad", { headers: AUTH })).status).toBe(400);
+	});
+});
+
+describe("diagnostics", () => {
+	it("validates without touching D1 and returns the same field error as ingest", async () => {
+		const forbiddenDB = { prepare() { throw new Error("D1 must not be touched"); } } as unknown as D1Database;
+		const validate = (body: unknown, path = "/api/ingest/validate", token = "test-token") => worker.fetch(new Request(`https://example.com${path}`, {
+			method: "POST", headers: { Authorization: `Bearer ${token}` }, body: JSON.stringify(body),
+		}), { ...env, DB: forbiddenDB });
+		expect((await validate(EXPORT_PAYLOAD, undefined, "wrong")).status).toBe(401);
+		const result = await validate(EXPORT_PAYLOAD);
+		expect(await result.json()).toMatchObject({ ok: true, validationOnly: true, days: 2, rows: 3 });
+		const valid = { date: "2026-09-28", hour: 8, client: "qoder", modelId: "example-model", tokens: 100 };
+		for (const [field, value] of [["date", "2026-02-30"], ["hour", 24], ["modelId", ""], ["client", ""], ["tokens", -1], ["tokens", 2 ** 53]]) {
+			const bad = { ...EXPORT_PAYLOAD, hourly: [{ ...valid, [field]: value }] };
+			const validation = await validate(bad);
+			const ingest = await validate(bad, "/api/ingest");
+			expect(validation.status).toBe(400);
+			const error = await validation.json();
+			expect(error).toMatchObject({ error: { code: "bad_request", path: `hourly[0].${field}` } });
+			expect(await ingest.json()).toEqual(error);
+		}
+		for (const malformed of [null, [], { device: { id: "test" }, contributions: [null] }]) {
+			expect((await validate(malformed)).status).toBe(400);
+		}
+	});
+
+	it("authenticates health checks and diagnoses schema and D1 failures", async () => {
+		expect((await SELF.fetch("https://example.com/api/diagnostics")).status).toBe(401);
+		const response = await SELF.fetch("https://example.com/api/diagnostics", { headers: AUTH });
+		expect(await response.json()).toMatchObject({ ok: true, apiVersion: "0.3.0", database: { ok: true, missingTables: [], rowsWritten: 0 } });
+		const request = () => new Request("https://example.com/api/diagnostics", { headers: AUTH });
+		const broken = { prepare() { throw new Error("D1 quota exceeded test-token"); } } as unknown as D1Database;
+		const failure = await worker.fetch(request(), { ...env, DB: broken });
+		expect(failure.status).toBe(503);
+		const text = await failure.text();
+		expect(text).toContain("quota exceeded");
+		expect(text).not.toContain("test-token");
+		const empty = { prepare() { return { all: async () => ({ results: [], meta: { rows_read: 0, rows_written: 0 } }) }; } } as unknown as D1Database;
+		const missing = await worker.fetch(request(), { ...env, DB: empty });
+		expect(missing.status).toBe(503);
+		expect((await missing.json()).database.missingTables).toContain("daily_rows");
 	});
 });
 

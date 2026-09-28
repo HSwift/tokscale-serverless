@@ -26,12 +26,46 @@ struct Checkpoint {
     fingerprints: BTreeMap<String, String>,
 }
 
+pub(crate) struct PreparedSync {
+    pub payload: TsExport,
+    pub full: bool,
+    checkpoint: Checkpoint,
+}
+
 pub struct Session {
     _lock: File,
     state_path: PathBuf,
 }
 
 impl Session {
+    pub(crate) fn state_summary(&self, cfg: &Config, device: &DeviceInfo) -> serde_json::Value {
+        let bytes = match std::fs::read(&self.state_path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                return serde_json::json!({"state":"missing","nextSync":"full"})
+            }
+            Err(error) => {
+                return serde_json::json!({"state":"unreadable","error":error.to_string()})
+            }
+        };
+        match serde_json::from_slice::<Checkpoint>(&bytes) {
+            Ok(state) => {
+                let scope = cfg
+                    .sync_url
+                    .as_ref()
+                    .and_then(|url| fingerprint(&(url, &device.id)).ok());
+                serde_json::json!({
+                    "state":if state.version != STATE_VERSION {"unsupportedVersion"} else if scope.as_ref() != Some(&state.scope) {"differentConnection"} else {"valid"},
+                    "version":state.version,"buckets":state.fingerprints.len(),"acknowledgedAt":state.acknowledged_at,
+                    "clockAheadSecs":state.acknowledged_at.saturating_sub(chrono::Utc::now().timestamp()).max(0)
+                })
+            }
+            Err(error) => {
+                serde_json::json!({"state":"invalid","line":error.line(),"column":error.column(),"nextSync":"full"})
+            }
+        }
+    }
+
     pub async fn acquire(wait: bool) -> Result<Option<Self>, String> {
         Self::acquire_in(&tokscale_core::paths::get_config_dir(), wait).await
     }
@@ -89,23 +123,48 @@ impl Session {
         payload: TsExport,
         force_full: bool,
     ) -> Result<(), String> {
+        let Some(prepared) = self.prepare(cfg, payload, force_full)? else {
+            tracing::info!("sync skipped; usage unchanged");
+            return Ok(());
+        };
+        self.send(cfg, prepared).await.map(|_| ())
+    }
+
+    pub(crate) fn prepare(
+        &self,
+        cfg: &Config,
+        payload: TsExport,
+        force_full: bool,
+    ) -> Result<Option<PreparedSync>, String> {
         let url = cfg.sync_url.as_deref().ok_or("sync disabled")?;
-        // Credentials are never persisted here. Changing the endpoint or device
-        // starts with a complete upload, not another connection's anchor.
         let scope = fingerprint(&(url, &payload.device.id))?;
         let previous = read_checkpoint(&self.state_path, &scope)?;
         let full = force_full || previous.is_none();
-        let plan = plan(
+        Ok(plan(
             payload,
             previous,
             scope,
             full,
             chrono::Utc::now().timestamp(),
-        )?;
-        let Some((payload, checkpoint)) = plan else {
-            tracing::info!("sync skipped; usage unchanged");
-            return Ok(());
-        };
+        )?
+        .map(|(payload, checkpoint)| PreparedSync {
+            payload,
+            checkpoint,
+            full,
+        }))
+    }
+
+    pub(crate) async fn send(
+        &self,
+        cfg: &Config,
+        prepared: PreparedSync,
+    ) -> Result<crate::http::Reply, String> {
+        let PreparedSync {
+            payload,
+            checkpoint,
+            full,
+        } = prepared;
+        let url = cfg.sync_url.as_deref().ok_or("sync disabled")?;
         let days = payload.contributions.len();
         let rows: usize = payload
             .contributions
@@ -118,21 +177,20 @@ impl Session {
         if let Some(token) = &cfg.sync_token {
             request = request.bearer_auth(token);
         }
-        let response = request
-            .send()
+        let response = crate::http::send(request, cfg.sync_token.as_deref())
             .await
-            .map_err(|e| format!("send failed: {e}"))?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(format!("worker replied {status}; sync anchor unchanged"));
+            .map_err(|error| format!("send failed: {error}; sync anchor unchanged"))?;
+        if !response.success() {
+            return Err(format!(
+                "worker replied {}; sync anchor unchanged",
+                response.describe()
+            ));
         }
-        // An HTML login page or an incomplete response is not an ingest ACK.
-        let ack: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|_| "worker returned an invalid acknowledgement; sync anchor unchanged")?;
-        if ack.get("ok").and_then(|v| v.as_bool()) != Some(true) {
-            return Err("worker did not acknowledge the upload; sync anchor unchanged".into());
+        if response.body.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+            return Err(format!(
+                "worker did not acknowledge the upload ({}); sync anchor unchanged",
+                response.describe()
+            ));
         }
         save_checkpoint(&self.state_path, &checkpoint)?;
         tracing::info!(
@@ -142,7 +200,7 @@ impl Session {
             hours,
             "cloud sync push complete; sync anchor saved"
         );
-        Ok(())
+        Ok(response)
     }
 }
 

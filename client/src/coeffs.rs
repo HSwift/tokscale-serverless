@@ -125,6 +125,25 @@ fn config_path() -> Option<PathBuf> {
     p.is_file().then_some(p)
 }
 
+pub(crate) fn diagnostics() -> serde_json::Value {
+    let Some(path) = config_path() else {
+        return serde_json::json!({"configured":false,"note":"No calibration file; reported usage and credits still work."});
+    };
+    let result = std::fs::read_to_string(&path)
+        .map_err(|e| e.to_string())
+        .and_then(|s| {
+            serde_json::from_str::<CoeffTable>(&s)
+                .map_err(|_| "expected qoder-token-estimates/2".to_string())
+        });
+    match result {
+        Ok(table) => serde_json::json!({"configured":true,"path":path,"valid":true,
+            "models":table.models.len(),"usableModels":table.models.keys().filter(|m| table.model(m).is_some()).count()}),
+        Err(error) => {
+            serde_json::json!({"configured":true,"path":path,"valid":false,"error":error})
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

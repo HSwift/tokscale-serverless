@@ -17,6 +17,7 @@ import {
 } from "./auth";
 import { installerScript, releases } from "./install";
 import { cachedRead, invalidateReads } from "./read-cache";
+import { isValidDate, validateIngest, type IngestIssue } from "./validate";
 
 interface TsTokenBreakdown {
 	input?: number;
@@ -61,15 +62,6 @@ interface TsExport {
 	device?: TsDevice;
 	contributions?: TsDailyContribution[];
 	hourly?: { date: string; hour: number; client: string; modelId: string; tokens: number }[];
-}
-
-const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-
-function isValidDate(s: string): boolean {
-	if (!DATE_RE.test(s)) return false;
-	const [y, m, d] = s.split("-").map(Number);
-	if (m < 1 || m > 12 || d < 1) return false;
-	return d <= new Date(Date.UTC(y, m, 0)).getUTCDate();
 }
 
 function json(body: unknown, status = 200): Response {
@@ -126,20 +118,26 @@ function num(value: unknown): number {
 	return Number.isFinite(n) ? n : 0;
 }
 
-async function ingest(request: Request, env: Env): Promise<Response> {
+function rejectIngest(issue: IngestIssue): Response {
+	console.warn("ingest validation failed", issue);
+	return json({ error: { code: "bad_request", path: issue.path, message: `${issue.path}: ${issue.message}` } }, 400);
+}
+
+async function ingest(request: Request, env: Env, validationOnly = false): Promise<Response> {
 	let body: TsExport;
 	try {
 		body = (await request.json()) as TsExport;
 	} catch {
-		return error(400, "bad_request", "body must be JSON");
+		return rejectIngest({ path: "body", message: "must be valid JSON" });
 	}
-	const device = body.device ?? {};
-	if (!device.id || typeof device.id !== "string") {
-		return error(400, "bad_request", "device.id is required");
+	const issue = validateIngest(body);
+	if (issue) return rejectIngest(issue);
+	if (validationOnly) {
+		return json({ ok: true, validationOnly: true, days: body.contributions!.length,
+			rows: body.contributions!.reduce((n, day) => n + (day.clients ?? []).filter(row => row.client && row.modelId).length, 0),
+			hourly: body.hourly?.length ?? 0 });
 	}
-	if (!Array.isArray(body.contributions)) {
-		return error(400, "bad_request", "contributions must be an array");
-	}
+	const device = body.device!;
 
 	const stmts: D1PreparedStatement[] = [
 		env.DB.prepare(
@@ -167,11 +165,8 @@ async function ingest(request: Request, env: Env): Promise<Response> {
 
 	let days = 0;
 	let rows = 0;
-	for (const day of body.contributions) {
+	for (const day of body.contributions!) {
 		const date = day.date ?? "";
-		if (!isValidDate(date)) {
-			return error(400, "bad_request", `invalid contribution date '${date}'`);
-		}
 		days += 1;
 		const costIsComplete = day.totals?.costIsComplete;
 		for (const row of day.clients ?? []) {
@@ -236,14 +231,7 @@ async function ingest(request: Request, env: Env): Promise<Response> {
 	}
 
 	if (body.hourly !== undefined) {
-		if (!Array.isArray(body.hourly)) return error(400, "bad_request", "hourly must be an array");
 		for (const row of body.hourly) {
-			if (!row || typeof row.date !== "string" || !isValidDate(row.date) ||
-				!Number.isInteger(row.hour) || row.hour < 0 || row.hour > 23 ||
-				typeof row.client !== "string" || !row.client || typeof row.modelId !== "string" || !row.modelId ||
-				!Number.isSafeInteger(row.tokens) || row.tokens < 0) {
-				return error(400, "bad_request", "invalid hourly contribution");
-			}
 			stmts.push(env.DB.prepare(`INSERT INTO hourly_rows
 				(device_id, date, hour, client, model_id, tokens) VALUES (?, ?, ?, ?, ?, ?)
 				ON CONFLICT(device_id, date, hour, client, model_id) DO UPDATE SET
@@ -266,7 +254,9 @@ async function ingest(request: Request, env: Env): Promise<Response> {
 	} catch (error) {
 		// A failed response may still follow a committed earlier batch.
 		invalidateReads(env);
-		throw error;
+		const message = String(error).split(env.INGEST_TOKEN || "\0").join("[redacted]").slice(0, 1024);
+		console.error("ingest database failed", { message });
+		return json({ error: { code: "database_error", message } }, 500);
 	}
 	if (rowsWritten > 0) invalidateReads(env);
 	return json({ ok: true, days, rows, rowsRead, rowsWritten });
@@ -275,6 +265,25 @@ async function ingest(request: Request, env: Env): Promise<Response> {
 interface Filters {
 	where: string;
 	binds: string[];
+}
+
+// On-demand only: inspect a few schema records, not usage tables. Auth is checked
+// before reaching this handler. Never include credentials or device statistics.
+async function diagnostics(env: Env): Promise<Response> {
+	const started = Date.now();
+	const base = { apiVersion: "0.3.0", serverTime: new Date().toISOString() };
+	try {
+		const result = await env.DB.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('devices', 'daily_rows', 'daily_credits', 'hourly_rows')")
+			.all<{ name: string }>();
+		const found = new Set(result.results.map(row => row.name));
+		const missingTables = ["devices", "daily_rows", "daily_credits", "hourly_rows"].filter(name => !found.has(name));
+		const ok = missingTables.length === 0;
+		return json({ ...base, ok, database: { ok, missingTables, elapsedMs: Date.now() - started,
+			rowsRead: result.meta.rows_read, rowsWritten: result.meta.rows_written } }, ok ? 200 : 503);
+	} catch (error) {
+		const message = String(error).split(env.INGEST_TOKEN || "\0").join("[redacted]").slice(0, 1024);
+		return json({ ...base, ok: false, database: { ok: false, elapsedMs: Date.now() - started, error: message } }, 503);
+	}
 }
 
 function filters(url: URL): Filters | Response {
@@ -550,10 +559,10 @@ export default {
 		if (!url.pathname.startsWith("/api/")) {
 			return error(404, "not_found", "unknown route");
 		}
-		if (url.pathname === "/api/ingest" && request.method === "POST") {
+		if (["/api/ingest", "/api/ingest/validate"].includes(url.pathname) && request.method === "POST") {
 			const authFailure = await requireBearer(request, env);
 			if (authFailure) return authFailure;
-			return ingest(request, env);
+			return ingest(request, env, url.pathname === "/api/ingest/validate");
 		}
 		const auth = await authenticateRead(request, env);
 		if ("failure" in auth) return auth.failure;
@@ -561,6 +570,8 @@ export default {
 			return error(405, "method_not_allowed", "unsupported method");
 		}
 		switch (url.pathname) {
+			case "/api/diagnostics":
+				return diagnostics(env);
 			case "/api/releases":
 				return releases(env);
 			case "/api/me":

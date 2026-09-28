@@ -393,7 +393,7 @@ async fn one_shot_sync_reuses_anchor_and_full_resends_history() {
         .with_file_name("sync-state.json")
         .is_file());
     let skipped = sync(&["sync"]);
-    assert!(String::from_utf8_lossy(&skipped.stdout).contains("usage unchanged"));
+    assert!(String::from_utf8_lossy(&skipped.stderr).contains("usage unchanged"));
     assert_eq!(received.lock().unwrap().len(), 1);
     write_usage(90); // A correction to an older day must not be missed.
     sync(&["sync"]);
@@ -435,4 +435,179 @@ fn assert_no_listening_sockets(pid: u32) {
             );
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn diagnostics_trace_local_remote_and_sync_failures_without_leaking_tokens() {
+    use axum::response::IntoResponse;
+    use std::sync::atomic::{AtomicU8, Ordering};
+    let mode = Arc::new(AtomicU8::new(0));
+    let routes: Arc<Mutex<Vec<String>>> = Arc::default();
+    let state = mode.clone();
+    let requests = routes.clone();
+    let app = Router::new().fallback(move |request: axum::extract::Request| {
+        let mode = state.load(Ordering::SeqCst);
+        let path = request.uri().path().to_string();
+        requests.lock().unwrap().push(path.clone());
+        async move {
+            assert_eq!(request.headers()["user-agent"], "tokscale-client/0.3.0");
+            assert_eq!(request.headers()["authorization"], "Bearer test-token");
+            if mode == 1 && path == "/api/me" {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({"error":{"message":"invalid test-token"}})),
+                )
+                    .into_response();
+            }
+            if mode == 2 && path == "/api/me" {
+                return (StatusCode::FOUND, [("location", "/login")]).into_response();
+            }
+            if mode == 3 && path == "/api/diagnostics" {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({"ok":false,"database":{"ok":false,"error":"quota exceeded"}})),
+                )
+                    .into_response();
+            }
+            if mode == 4 && path == "/api/ingest" {
+                return (StatusCode::BAD_REQUEST, [("cf-ray","test-ray")], Json(json!({
+                    "error":{"code":"bad_request","message":"hourly[0].tokens: invalid test-token"}
+                }))).into_response();
+            }
+            if mode == 5 && path == "/api/ingest/validate" {
+                return (StatusCode::METHOD_NOT_ALLOWED, "old API").into_response();
+            }
+            if mode == 6 && path == "/api/me" {
+                return (StatusCode::OK, "<html>test-token login page</html>").into_response();
+            }
+            if mode == 7 && path == "/api/me" {
+                return (StatusCode::BAD_GATEWAY, "test-token".repeat(3000)).into_response();
+            }
+            Json(match path.as_str() {
+                "/api/me" => json!({"actor":{"method":"bearer"}}),
+                "/api/diagnostics" => {
+                    json!({"ok":true,"apiVersion":"0.3.0","database":{"ok":true}})
+                }
+                "/api/ingest/validate" => json!({"ok":true,"validationOnly":true}),
+                "/api/ingest" => json!({"ok":true,"rowsRead":2,"rowsWritten":1}),
+                _ => panic!("unexpected diagnostic route"),
+            })
+            .into_response()
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let workspace = Workspace::new();
+    std::fs::create_dir_all(workspace.device_path().parent().unwrap()).unwrap();
+    std::fs::write(
+        workspace.device_path(),
+        json!({
+            "id":"dev_debug","createdAt":"2026-01-01T00:00:00Z", "syncUrl":url,
+            "syncToken":"test-token","refreshIntervalSecs":3600
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let source = workspace.0.join("data/.qoder/projects/test");
+    std::fs::create_dir_all(&source).unwrap();
+    let usage = |model: &str| {
+        json!({"type":"assistant", "timestamp":"2026-09-22T08:00:00Z", "message":{
+            "id":"example", "model":model, "usage":{"input_tokens":100,"output_tokens":10,"credits":1}
+        }})
+    };
+    std::fs::write(
+        source.join("test.jsonl"),
+        usage("example-model").to_string(),
+    )
+    .unwrap();
+    let anchor = workspace.device_path().with_file_name("sync-state.json");
+    let run = |args: &[&str], expected: bool| -> Value {
+        let output = workspace.command().args(args).output().unwrap();
+        assert_eq!(
+            output.status.success(),
+            expected,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!combined.contains("test-token"));
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+    let check = |report: &Value, stage: &str| {
+        report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["stage"] == stage)
+            .unwrap()
+            .clone()
+    };
+    let local = run(&["debug", "--local"], true);
+    assert_eq!(local["version"], "0.3.0");
+    assert_eq!(
+        check(&local, "collection")["details"]["messagesByTool"]["qoder"],
+        1
+    );
+    assert!(routes.lock().unwrap().is_empty());
+    assert!(!anchor.exists());
+    let dry = run(&["debug"], true);
+    assert_eq!(check(&dry, "syncPlan")["details"]["mode"], "full");
+    assert!(!anchor.exists());
+    assert_eq!(
+        *routes.lock().unwrap(),
+        ["/api/me", "/api/diagnostics", "/api/ingest/validate"]
+    );
+    let sent = run(&["debug", "--sync"], true);
+    assert_eq!(
+        check(&sent, "upload")["details"]["response"]["body"]["rowsWritten"],
+        1
+    );
+    let saved = std::fs::read(&anchor).unwrap();
+    for value in [1, 2, 3, 5, 6, 7] {
+        mode.store(value, Ordering::SeqCst);
+        let report = run(&["debug", "--sync"], false);
+        assert_eq!(check(&report, "upload")["details"]["anchorAdvanced"], false);
+        assert_eq!(std::fs::read(&anchor).unwrap(), saved);
+    }
+    mode.store(4, Ordering::SeqCst);
+    let failed = workspace
+        .command()
+        .args(["sync", "--full"])
+        .output()
+        .unwrap();
+    assert!(!failed.status.success());
+    let stderr = String::from_utf8_lossy(&failed.stderr);
+    assert!(stderr.contains("hourly[0].tokens"));
+    assert!(stderr.contains("test-ray"));
+    assert!(!stderr.contains("test-token"));
+    assert_eq!(std::fs::read(&anchor).unwrap(), saved);
+    std::fs::write(source.join("test.jsonl"), usage("").to_string()).unwrap();
+    let invalid = run(&["debug", "--local"], false);
+    assert_eq!(
+        check(&invalid, "localPayload")["details"]["validationErrors"][0]["path"],
+        "hourly[0].modelId"
+    );
+    server.abort();
+    let _ = server.await;
+    let disconnected = run(&["debug"], false);
+    assert!(check(&disconnected, "authentication")["details"]["error"].is_string());
+    assert_eq!(std::fs::read(&anchor).unwrap(), saved);
+    std::fs::write(&anchor, b"truncated {").unwrap();
+    let corrupt = run(&["debug", "--local"], false);
+    assert_eq!(check(&corrupt, "syncState")["details"]["state"], "invalid");
+    assert_eq!(std::fs::read(&anchor).unwrap(), b"truncated {");
+    std::fs::write(
+        workspace.device_path(),
+        r#"{"syncToken":"test-token", "refreshIntervalSecs":"bad"}"#,
+    )
+    .unwrap();
+    let invalid_config = run(&["debug"], false);
+    assert_eq!(check(&invalid_config, "configuration")["ok"], false);
 }

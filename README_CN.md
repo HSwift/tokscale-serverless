@@ -190,6 +190,21 @@ tokscale-client sync --full  # 重新上传全部可用的本地历史，然后�
 
 API 跳过未变化的更新，设备信息不变时最多每小时更新一次心跳。上报响应包含 D1 的 `rowsRead`、`rowsWritten` 计数。控制台按可显示的日期范围，用一次查询取得设备、工具、模型三种视图；统计结果在每个 Worker 实例内缓存最多 5 分钟，实际写入后清除该实例的缓存。缓存仍需先通过鉴权，不增加存储绑定，不同实例之间最多可能有 5 分钟的数据延迟。
 
+### 诊断
+
+使用与服务相同的用户、环境变量和配置目录运行：
+
+```sh
+tokscale-client --version
+tokscale-client debug > tokscale-debug.json
+tokscale-client debug --local  # 仅检查本地，不发送远程请求
+tokscale-client debug --sync   # 检查后再执行一次正常增量同步
+```
+
+JSON 报告按阶段展示配置与数据源访问、采集数量、上报校验、同步锁和游标、鉴权、服务端健康、远程数据校验，包含耗时、HTTP 状态、服务端错误和 Cloudflare Ray ID。任一检查失败以状态码 1 退出。诊断执行一次，不监听本地端口；日志写入 stderr。需要解析细节时运行 `RUST_LOG=debug tokscale-client debug > tokscale-debug.json 2> tokscale-debug.log`；PowerShell 先设置 `$env:RUST_LOG='debug'`。
+
+默认诊断不上报统计、不推进游标。需鉴权的 `POST /api/ingest/validate` 与上报共用校验规则，完全不访问 D1；`GET /api/diagnostics` 仅执行一次轻量的只读表结构检查，排查绑定、迁移和配额问题。诊断接口返回 404/405 时，应先更新 API Worker。`--sync` 仅在所有检查通过后上传。报告不包含 token 和原始对话，但包含本机路径、API 地址和异常聚合记录；保留在本地或检查后再分享，不放入发布包。
+
 ### 环境变量
 
 | 变量 | 用途与默认行为 |

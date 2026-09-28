@@ -2,7 +2,9 @@ mod coeffs;
 mod config;
 mod connect;
 mod device;
+mod diagnostics;
 mod export;
+mod http;
 mod qoder;
 mod scan;
 mod service;
@@ -13,6 +15,7 @@ use std::io::IsTerminal;
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
@@ -21,8 +24,21 @@ async fn main() {
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let command = args.first().map(String::as_str).unwrap_or("");
+    if matches!(command, "--version" | "-V") {
+        println!("tokscale-client {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+    if command == "debug" {
+        let mode = args.get(1).map(String::as_str);
+        if args.len() > 2 || !matches!(mode, None | Some("--local" | "--sync")) {
+            eprintln!("usage: tokscale-client debug [--local | --sync]");
+            std::process::exit(2);
+        }
+        let ok = diagnostics::run(mode == Some("--local"), mode == Some("--sync")).await;
+        std::process::exit(if ok { 0 } else { 1 });
+    }
     if matches!(command, "--help" | "-h" | "help") {
-        println!("tokscale-client [connect [WORKER_URL] | run | sync [--full] | service <COMMAND>]\n\n  connect  Verify and save Worker URL/token (token input is hidden)\n  run      Collect periodically; upload only changed usage\n  sync     Collect and sync once, then exit; --full resends all local history\n  service  Install and manage a Linux/macOS background service\n           Commands: install, uninstall, start, stop, restart, status, logs\n\nWith no command, first-time interactive startup offers connection setup.\nConfiguration: {}\nEnvironment variables override saved configuration.", config::connection_path().display());
+        println!("tokscale-client [connect [WORKER_URL] | run | sync [--full] | debug [--local | --sync] | service <COMMAND>]\n\n  connect  Verify and save Worker URL/token (token input is hidden)\n  run      Collect periodically; upload only changed usage\n  sync     Collect and sync once, then exit; --full resends all local history\n  debug    JSON diagnostics: collection, sync plan, network, auth and D1\n           --local skips remote probes; --sync also uploads changes\n  service  Install and manage a Linux/macOS background service\n           Commands: install, uninstall, start, stop, restart, status, logs\n\nWith no command, first-time interactive startup offers connection setup.\nConfiguration: {}\nEnvironment variables override saved configuration.", config::connection_path().display());
         return;
     }
     if command == "service" {
@@ -44,7 +60,7 @@ async fn main() {
     if !(once && (args.len() == 1 || (full && args.len() == 2))
         || matches!(command, "" | "run") && args.len() <= 1)
     {
-        eprintln!("usage: tokscale-client [connect [WORKER_URL] | run | sync [--full] | service <COMMAND>]");
+        eprintln!("usage: tokscale-client [connect [WORKER_URL] | run | sync [--full] | debug [--local | --sync] | service <COMMAND>]");
         std::process::exit(2);
     }
 

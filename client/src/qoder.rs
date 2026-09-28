@@ -58,7 +58,7 @@ pub fn scan(home: &Path, use_env_roots: bool, coeffs: &CoeffTable) -> QoderScan 
     out
 }
 
-fn db_candidates(home: &Path, env: impl Fn(&str) -> Option<PathBuf>) -> Vec<PathBuf> {
+pub(crate) fn db_candidates(home: &Path, env: impl Fn(&str) -> Option<PathBuf>) -> Vec<PathBuf> {
     let mut v = Vec::new();
     if let Some(p) = env("QODER_DB_PATH") {
         v.push(p);
@@ -114,7 +114,10 @@ fn shared_client_cache_db(app_root: &Path) -> PathBuf {
         .join("local.db")
 }
 
-fn projects_candidates(home: &Path, env: impl Fn(&str) -> Option<PathBuf>) -> Vec<PathBuf> {
+pub(crate) fn projects_candidates(
+    home: &Path,
+    env: impl Fn(&str) -> Option<PathBuf>,
+) -> Vec<PathBuf> {
     let mut v = Vec::new();
     if let Some(p) = env("QODER_PROJECTS_DIR") {
         v.push(p);
@@ -336,8 +339,12 @@ fn parse_projects(
 }
 
 fn collect_jsonl(dir: &Path, files: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::warn!(path = %dir.display(), %error, "cannot read Qoder source directory");
+            return;
+        }
     };
     for entry in entries.flatten() {
         let path = entry.path();
@@ -363,14 +370,21 @@ fn parse_transcript(
     out: &mut QoderScan,
     coeffs: &CoeffTable,
 ) {
-    let Ok(content) = std::fs::read_to_string(path) else {
-        return;
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) => {
+            tracing::warn!(path = %path.display(), %error, "cannot read Qoder transcript");
+            return;
+        }
     };
     let mut rows: Vec<TranscriptRow> = Vec::new();
     let mut indexes: HashMap<String, usize> = HashMap::new();
     let mut reset = false;
     for (idx, line) in content.lines().enumerate() {
         let Ok(rec) = serde_json::from_str::<serde_json::Value>(line) else {
+            if !line.trim().is_empty() {
+                tracing::debug!(path = %path.display(), line = idx + 1, "skipping malformed Qoder JSONL record");
+            }
             continue;
         };
         if rec.get("subtype").and_then(|v| v.as_str()) == Some("compact_boundary")

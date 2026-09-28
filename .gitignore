@@ -9,3 +9,5 @@ sync-state.json
 sync.lock
 **/__pycache__/
 /qoder-calibration/
+tokscale-debug*.json
+tokscale-debug*.log
