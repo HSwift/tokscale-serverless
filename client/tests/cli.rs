@@ -44,7 +44,6 @@ impl Workspace {
             .env("TOKSCALE_CLIENTS", "qoder")
             .env("TOKSCALE_PRICING", "off")
             .env("QODER_PROJECTS_DIR", self.0.join("excluded projects"))
-            .env("BIND_ADDR", "127.0.0.1:0")
             .env("NO_PROXY", "127.0.0.1,localhost")
             .stdin(Stdio::null());
         cmd
@@ -78,9 +77,14 @@ fn help_resolves_unicode_configuration_directory_and_run_never_prompts() {
     assert!(String::from_utf8_lossy(&result.stdout)
         .contains(&workspace.device_path().display().to_string()));
     assert!(!workspace.device_path().exists());
-    let result = workspace.command().arg("run").output().unwrap();
+    for args in [vec![], vec!["run"]] {
+        let result = workspace.command().args(args).output().unwrap();
+        assert_eq!(result.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&result.stderr).contains("connect"));
+    }
+    let result = workspace.command().arg("local").output().unwrap();
     assert_eq!(result.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&result.stderr).contains("connect"));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("usage:"));
     assert!(!workspace.device_path().exists());
 }
 
@@ -154,8 +158,19 @@ async fn connection_rotation_restart_and_periodic_collection_across_platforms() 
                         .to_str()
                         .unwrap()
                         .to_string();
-                    uploads.lock().unwrap().push((token, body));
-                    Json(json!({"ok": true}))
+                    let attempt = {
+                        let mut uploads = uploads.lock().unwrap();
+                        uploads.push((token, body));
+                        uploads.len()
+                    };
+                    // Exercise retrying a failed upload and shutdown during an
+                    // in-flight request, without interrupting the last upload.
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    if attempt == 1 {
+                        Err(StatusCode::SERVICE_UNAVAILABLE)
+                    } else {
+                        Ok(Json(json!({"ok": true})))
+                    }
                 }
             }),
         );
@@ -218,20 +233,27 @@ async fn connection_rotation_restart_and_periodic_collection_across_platforms() 
     assert_eq!(rejected.status.code(), Some(2));
     assert_eq!(std::fs::read(workspace.device_path()).unwrap(), original);
 
-    // Each process starts with no SYNC_* variables or interval override.
-    for _ in 0..2 {
+    // A stale service setting must no longer cause a port conflict.
+    let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    for periodic in [true, true, false] {
         let before = received.lock().unwrap().len();
+        let mut command = workspace.command();
+        command
+            .arg("run")
+            .env("BIND_ADDR", occupied.local_addr().unwrap().to_string());
+        if !periodic {
+            command.env("REFRESH_INTERVAL_SECS", "0");
+        }
         let mut client = RunningClient(
-            workspace
-                .command()
-                .arg("run")
+            command
                 .stdout(Stdio::null())
                 .stderr(Stdio::inherit())
                 .spawn()
                 .unwrap(),
         );
         tokio::time::timeout(Duration::from_secs(30), async {
-            while received.lock().unwrap().len() < before + 2 {
+            let expected = before + if periodic { 2 } else { 1 };
+            while received.lock().unwrap().len() < expected {
                 assert!(
                     client.0.try_wait().unwrap().is_none(),
                     "collector exited early"
@@ -241,6 +263,35 @@ async fn connection_rotation_restart_and_periodic_collection_across_platforms() 
         })
         .await
         .expect("collector did not upload initial and periodic scans");
+        #[cfg(target_os = "linux")]
+        assert_no_listening_sockets(client.0.id());
+        if !periodic {
+            tokio::time::sleep(Duration::from_millis(1200)).await;
+            assert_eq!(received.lock().unwrap().len(), before + 1);
+            assert!(client.0.try_wait().unwrap().is_none());
+        }
+        #[cfg(unix)]
+        {
+            assert!(Command::new("kill")
+                .args(["-TERM", &client.0.id().to_string()])
+                .status()
+                .unwrap()
+                .success());
+            let status = tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    if let Some(status) = client.0.try_wait().unwrap() {
+                        break status;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("collector did not shut down gracefully");
+            assert!(
+                status.success(),
+                "collector was terminated instead of stopping cleanly"
+            );
+        }
         drop(client);
     }
     for (token, payload) in received.lock().unwrap().iter() {
@@ -252,8 +303,49 @@ async fn connection_rotation_restart_and_periodic_collection_across_platforms() 
         assert_eq!(payload["contributions"].as_array().unwrap().len(), 1);
         assert_eq!(payload["contributions"][0]["totals"]["messages"], 1);
         assert_eq!(payload["contributions"][0]["totals"]["tokens"], 110);
+        assert_eq!(payload["contributions"][0]["totals"]["credits"], 0.1);
+        assert_eq!(
+            payload["contributions"][0]["totals"]["costIsComplete"],
+            false
+        );
+        assert_eq!(payload["hourly"].as_array().unwrap().len(), 1);
+        assert_eq!(payload["hourly"][0]["tokens"], 110);
+        assert_eq!(payload["hourly"][0]["client"], "qoder");
+        assert_eq!(payload["hourly"][0]["modelId"], "qmodel");
+        assert_eq!(
+            payload["meta"]["dateRange"]["start"],
+            payload["contributions"][0]["date"]
+        );
+        assert_eq!(
+            payload["meta"]["dateRange"]["end"],
+            payload["contributions"][0]["date"]
+        );
         assert!(!payload.to_string().contains("rotated-token"));
         assert!(payload["device"].get("syncToken").is_none());
     }
     server.abort();
+}
+
+#[cfg(target_os = "linux")]
+fn assert_no_listening_sockets(pid: u32) {
+    let sockets: std::collections::HashSet<_> = std::fs::read_dir(format!("/proc/{pid}/fd"))
+        .unwrap()
+        .filter_map(|entry| std::fs::read_link(entry.ok()?.path()).ok())
+        .filter_map(|path| {
+            path.to_str()?
+                .strip_prefix("socket:[")?
+                .strip_suffix(']')
+                .map(str::to_string)
+        })
+        .collect();
+    for protocol in ["tcp", "tcp6"] {
+        let table = std::fs::read_to_string(format!("/proc/{pid}/net/{protocol}")).unwrap();
+        for line in table.lines().skip(1) {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            assert!(
+                !(fields[3] == "0A" && sockets.contains(fields[9])),
+                "collector unexpectedly owns a listening {protocol} socket"
+            );
+        }
+    }
 }

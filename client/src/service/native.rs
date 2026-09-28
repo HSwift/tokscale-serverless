@@ -64,14 +64,12 @@ fn service_environment(paths: &Paths) -> Result<BTreeMap<String, String>, String
     // Capture collector options, not the invoking shell's entire environment.
     // SYNC_URL and SYNC_TOKEN continue to come from device.json after rotation.
     for key in [
-        "BIND_ADDR",
         "REFRESH_INTERVAL_SECS",
         "TOKSCALE_CLIENTS",
         "TOKSCALE_PRICING",
         "TOKSCALE_USE_ENV_ROOTS",
         "TOKSCALE_DEVICE_ID",
         "TOKSCALE_DEVICE_NAME",
-        "TOKSCALE_API_TOKEN",
         "RUST_LOG",
         "HTTP_PROXY",
         "HTTPS_PROXY",

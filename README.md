@@ -14,7 +14,6 @@ This project uses Tokscale's `tokscale-core` to parse local session records and 
 - **Automatic collection and synchronization**: Enter the Worker URL and token once. The collector verifies and saves the connection, then uses it on subsequent launches. By default, it scans and synchronizes every 60 seconds.
 - **Self-hosted deployment**: Run the API, database, and console in your own Cloudflare account, with a shared token authenticating device uploads.
 - **Cross-platform collector**: Build targets are available for Linux x86_64, Windows x86_64, macOS Intel, and Apple Silicon.
-- **Local queries and exports**: An HTTP API provides local usage queries, aggregated data exports, and manual refreshes.
 - **Qoder support**: An additional Qoder data source extends upstream parsing support. Credits are tracked separately from costs in USD.
 
 Supported data sources depend on the pinned version of `tokscale-core`. Some clients require you to generate local caches or exports using the upstream instructions before the collector can read them.
@@ -33,7 +32,7 @@ flowchart LR
 
 | Component | Directory | Responsibilities |
 | --- | --- | --- |
-| Collector | [`client/`](client/) | Rust + Axum; parses local data, serves a local API, and uploads on a schedule |
+| Collector | [`client/`](client/) | Rust; parses local data and uploads on a schedule |
 | Cloud API | [`worker/api/`](worker/api/) | Authenticates requests, receives uploads, reads and writes D1, and queries aggregated usage |
 | Web console | [`worker/console/`](worker/console/) | Static dashboard, API queries, and Access-authenticated installation commands through a Service Binding |
 | Database migrations | [`worker/api/migrations/`](worker/api/migrations/) | Schemas for devices, daily/hourly usage, credits, and the deployed API address |
@@ -42,7 +41,7 @@ The console uses **Workers Static Assets**. It and the API are separate Workers;
 
 ### Data and synchronization
 
-The collector scans once at startup, then rescans at the configured interval and uploads aggregated results to `/api/ingest`. The backend updates rows by device, date, client, and model, so repeated uploads from the same device do not double-count usage. Synchronization failures are logged; local queries remain available, and synchronization is retried after the next scan.
+The collector scans once at startup, then rescans at the configured interval and uploads aggregated results to `/api/ingest`. The backend updates rows by device, date, client, and model, so repeated uploads from the same device do not double-count usage. Synchronization failures are logged and retried after the next scan. The collector only makes outbound requests and does not listen on a local port.
 
 Hourly totals add an hour (0–23) to those dimensions and include all five token categories. Dates and hours follow each collector's local timezone, matching the heatmap; hosts in different timezones are not converted to one common timezone. Older collectors remain compatible but provide only daily totals. Upgrade and resync to backfill hourly data from retained local records; records without usable timestamps remain daily-only.
 
@@ -95,7 +94,6 @@ You can also launch the collector in a terminal without arguments. If no connect
 | --- | --- |
 | `connect [WORKER_URL]` | Verifies and saves a connection; also updates the URL or token. Existing configuration is preserved if verification fails |
 | `run` | Continuously collects and synchronizes using the saved connection; exits without prompting if configuration is missing |
-| `local` | Collects data and serves the local API only, ignoring the cloud connection |
 | `service <COMMAND>` | Installs and manages a Linux systemd user service or macOS LaunchAgent |
 | `--help` | Shows command help and the current configuration file path |
 
@@ -173,19 +171,17 @@ On all three platforms, use `TOKSCALE_CONFIG_DIR` to select a configuration dire
 
 | Variable | Purpose and default behavior |
 | --- | --- |
-| `BIND_ADDR` | Local API listen address; defaults to `127.0.0.1:8788` |
 | `TOKSCALE_CONFIG_DIR` | Directory for device configuration, connection configuration, and upstream caches |
 | `TOKSCALE_HOME` | Home directory to scan; defaults to the current user's home directory |
 | `TOKSCALE_CLIENTS` | Optional comma-separated list of clients, such as `claude,codex,qoder` |
 | `TOKSCALE_PRICING` | `cached` (default), `remote`, or `off` |
-| `TOKSCALE_API_TOKEN` | Optional protection for the local `/api/*` endpoints; separate from the cloud `INGEST_TOKEN` |
 | `REFRESH_INTERVAL_SECS` | Overrides the collection interval; the initial connection defaults to `60`. Set to `0` to disable periodic scans |
-| `SYNC_URL` / `SYNC_TOKEN` | Override the saved connection; overriding the URL also requires a token. An empty `SYNC_URL` disables synchronization |
+| `SYNC_URL` / `SYNC_TOKEN` | Override the saved connection; overriding the URL also requires a token. An empty `SYNC_URL` clears the connection for this invocation and prevents collection from starting |
 | `TOKSCALE_USE_ENV_ROOTS` | Defaults to `true`; setting it to `false` ignores environment overrides for client source directories |
 | `TOKSCALE_DEVICE_ID` / `TOKSCALE_DEVICE_NAME` | Optional overrides for the device ID or display name; normally retain the generated ID |
 | `TOKSCALE_QODER_COEFFS` | Path to user-measured Qoder coefficients; defaults to `qoder-coeffs.json` beside `device.json`. No coefficients are bundled |
 
-Environment variables take precedence over saved configuration. Runtime overrides are not written to disk. Connection and interval values supplied when running `connect` are saved after successful verification. In local-only mode, if no interval is specified, the collector scans only once at startup.
+Environment variables take precedence over saved configuration. Runtime overrides are not written to disk. Connection and interval values supplied when running `connect` are saved after successful verification.
 
 Prices are loaded from the local cache by default. If no cache exists yet, use `TOKSCALE_PRICING=remote` to fetch prices. Costs are usage estimates and may differ from provider invoices.
 
@@ -221,7 +217,7 @@ On Linux and macOS, run these commands as your normal user. Replace `./tokscale-
 ~/.local/bin/tokscale-client service logs
 ```
 
-`install` copies the executable to `~/.local/bin/tokscale-client`, registers the service, and starts it immediately using the connection in `device.json`. Stop any foreground collector first to avoid a port conflict. No repository checkout or additional token entry is needed.
+`install` copies the executable to `~/.local/bin/tokscale-client`, registers the service, and starts it immediately using the connection in `device.json`. Stop any foreground collector before installing the service. No repository checkout or additional token entry is needed.
 
 - **Linux:** installs `tokscale-client.service` under `$XDG_CONFIG_HOME/systemd/user` (default `~/.config/systemd/user`). It attempts to enable lingering for startup at boot and operation while logged out. If permission is denied, run the printed `sudo loginctl enable-linger "$USER"` command. Logs go to the journal.
 - **macOS:** installs `~/Library/LaunchAgents/io.tokscale.collector.plist`. The LaunchAgent starts at login and stops at logout. Logs go to `~/Library/Logs/tokscale-client.log`.
@@ -275,9 +271,7 @@ cargo run --locked -p tokscale-client -- connect http://127.0.0.1:18787
 cargo run --locked -p tokscale-client -- run
 ```
 
-The API is available at `http://127.0.0.1:18787`, the console at `http://127.0.0.1:8789`, and the collector's local API at `http://127.0.0.1:8788`. When both Workers are running, Wrangler connects the local Service Binding. A development connection overwrites the connection URL in the current configuration. To keep development and production configurations separate, set a dedicated `TOKSCALE_CONFIG_DIR` in the terminals running `connect` and `run`.
-
-To view local statistics only, run `cargo run --locked -p tokscale-client -- local`. The collector exposes `/health`, `/api/summary`, `/api/daily`, `/api/models`, `/api/clients`, `/api/sessions`, and `/api/export`, plus `POST /api/refresh` for a manual scan.
+The API is available at `http://127.0.0.1:18787` and the console at `http://127.0.0.1:8789`. When both Workers are running, Wrangler connects the local Service Binding. A development connection overwrites the connection URL in the current configuration. To keep development and production configurations separate, set a dedicated `TOKSCALE_CONFIG_DIR` in the terminals running `connect` and `run`.
 
 ### Validation and releases
 
@@ -295,7 +289,7 @@ Actions are pinned to full commit SHAs, with Dependabot checking for updates wee
 
 Cloud services use the Cloudflare Workers Builds setup described above, with Node.js 24 in the build environment. Run `npm --prefix worker run build` locally to bundle both Workers into `worker/dist/`. This uses Wrangler's `--dry-run` and does not deploy production services. The `check` command uses only the local database, while `deploy:api` migrates remote D1 and deploys the API, and `deploy:console` deploys the console.
 
-Collector archives contain only the executable. User configuration is created at runtime. Git ignores `.dev.vars`, Wrangler's local databases, and build directories. Collector statistics snapshots are held in memory, upstream parsers use local caches, and historical summaries across hosts are stored in D1.
+Collector archives contain only the executable. User configuration is created at runtime. Git ignores `.dev.vars`, Wrangler's local databases, and build directories. The collector processes each scan in memory, upstream parsers use local caches, and historical summaries across hosts are stored in D1.
 
 ## Troubleshooting
 

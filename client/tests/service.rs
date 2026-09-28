@@ -120,6 +120,8 @@ exit 0
         success(
             workspace
                 .command("install")
+                .env("BIND_ADDR", "127.0.0.1:9999")
+                .env("TOKSCALE_API_TOKEN", "obsolete-local-api-token")
                 .env("SYNC_TOKEN", "temporary-token-should-not-persist")
                 .env("SYNC_URL", "https://temporary.example")
                 .output()
@@ -132,6 +134,9 @@ exit 0
         assert!(service.contains("TOKSCALE_QODER_COEFFS"));
         assert!(service.contains("120"));
         for value in [
+            "BIND_ADDR",
+            "TOKSCALE_API_TOKEN",
+            "obsolete-local-api-token",
             "SYNC_TOKEN",
             "SYNC_URL",
             "saved-test-token",

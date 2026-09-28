@@ -1,6 +1,5 @@
 use crate::config::{Config, PricingMode};
 use crate::qoder::{self, QoderCredit};
-use crate::state::{AppState, Snapshot};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -9,40 +8,17 @@ use tokscale_core::scanner::ScannerSettings;
 use tokscale_core::sessions::UnifiedMessage;
 use tokscale_core::{parse_local_unified_messages_with_pricing, LocalParseOptions};
 
-pub enum RefreshOutcome {
-    AlreadyScanning,
-    Completed(Arc<Snapshot>),
+pub struct Snapshot {
+    pub messages: Vec<UnifiedMessage>,
+    /// Qoder plan credits, reported separately from USD costs.
+    pub credits: Vec<QoderCredit>,
+    pub pricing_loaded: bool,
+    pub scan_duration_ms: u128,
 }
 
-/// Run one scan, serialized against any in-flight scan. The parse itself is
-/// CPU-bound rayon + disk IO, so it runs on a dedicated runtime inside
-/// `spawn_blocking` and never blocks the axum executor.
-pub async fn refresh(state: &Arc<AppState>) -> Result<RefreshOutcome, String> {
-    let Ok(_guard) = state.scan_lock.try_lock() else {
-        return Ok(RefreshOutcome::AlreadyScanning);
-    };
-    state.set_scanning(true);
-    let result = run_scan(&state.cfg).await;
-    state.set_scanning(false);
-
-    let (messages, credits, pricing_loaded, scan_duration_ms) = result?;
-    let snapshot = state.store_snapshot(Snapshot {
-        messages,
-        credits,
-        scanned_at: Instant::now(),
-        scanned_at_rfc3339: chrono::Utc::now().to_rfc3339(),
-        scan_duration_ms,
-        pricing_loaded,
-    });
-    if state.cfg.sync_url.is_some() {
-        crate::sync::spawn_push(Arc::clone(state));
-    }
-    Ok(RefreshOutcome::Completed(snapshot))
-}
-
-async fn run_scan(
-    cfg: &Config,
-) -> Result<(Vec<UnifiedMessage>, Vec<QoderCredit>, bool, u128), String> {
+/// Run parsing and disk access off the async executor. Each snapshot is consumed
+/// by the uploader; there is no persistent in-memory query cache.
+pub async fn collect(cfg: &Config) -> Result<Snapshot, String> {
     let cfg = cfg.clone();
     let started = Instant::now();
     tokio::task::spawn_blocking(move || {
@@ -93,12 +69,12 @@ async fn run_scan(
                 messages.extend(scan.messages);
                 credits = scan.credits;
             }
-            Ok((
+            Ok(Snapshot {
                 messages,
                 credits,
                 pricing_loaded,
-                started.elapsed().as_millis(),
-            ))
+                scan_duration_ms: started.elapsed().as_millis(),
+            })
         })
     })
     .await

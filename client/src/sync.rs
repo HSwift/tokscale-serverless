@@ -1,36 +1,22 @@
 //! Cloud sync uploader: after every successful scan, push the full TsExport
 //! payload to the Worker's /api/ingest. Ingest upserts per
 //! (device, date, client, model), so resending full history is safe and needs
-//! no cursor bookkeeping. Sync failures never fail the scan that triggered
-//! them — local stats keep working offline.
+//! no cursor bookkeeping. Failed uploads are retried after the next scan.
 
-use crate::handlers::{export_payload, FilterQuery};
-use crate::state::AppState;
-use std::sync::Arc;
+use crate::config::Config;
+use crate::device::DeviceInfo;
+use crate::scan::Snapshot;
 
-pub fn spawn_push(state: Arc<AppState>) {
-    tokio::spawn(async move {
-        if let Err(e) = push(&state).await {
-            tracing::warn!("cloud sync push failed: {e}");
-        }
-    });
-}
-
-async fn push(state: &Arc<AppState>) -> Result<(), String> {
-    let url = state
-        .cfg
+pub async fn push(cfg: &Config, device: &DeviceInfo, snapshot: Snapshot) -> Result<(), String> {
+    let url = cfg
         .sync_url
-        .clone()
+        .as_deref()
         .ok_or_else(|| "sync disabled".to_string())?;
-    let snap = state
-        .current_snapshot()
-        .ok_or_else(|| "no snapshot yet".to_string())?;
-    let payload = export_payload(&snap, &state.device, &FilterQuery::default())
-        .map_err(|e| format!("failed to build export payload: {e:?}"))?;
+    let payload = crate::export::build_payload(snapshot, device);
 
     let client = crate::connect::http_client()?;
-    let mut request = client.post(&url).json(&payload);
-    if let Some(token) = &state.cfg.sync_token {
+    let mut request = client.post(url).json(&payload);
+    if let Some(token) = &cfg.sync_token {
         request = request.bearer_auth(token);
     }
     let response = request

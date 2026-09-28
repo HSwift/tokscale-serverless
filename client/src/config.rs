@@ -125,27 +125,14 @@ pub enum PricingMode {
     Remote,
 }
 
-impl PricingMode {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            PricingMode::Off => "off",
-            PricingMode::Cached => "cached",
-            PricingMode::Remote => "remote",
-        }
-    }
-}
-
 #[derive(Clone)]
 pub struct Config {
-    pub bind_addr: String,
     pub tokscale_home: Option<String>,
     pub clients: Option<Vec<String>>,
     pub pricing: PricingMode,
     pub refresh_interval_secs: u64,
     pub use_env_roots: bool,
-    /// Optional bearer token protecting `/api/*`. Absent = open (localhost use).
-    pub api_token: Option<String>,
-    /// Cloud sync target (the Worker's /api/ingest URL). Absent = sync off.
+    /// Cloud sync target (the Worker's /api/ingest URL). Required to run.
     pub sync_url: Option<String>,
     /// Shared ingest token sent as `Authorization: Bearer` on sync pushes.
     pub sync_token: Option<String>,
@@ -155,13 +142,6 @@ impl Config {
     pub fn from_env() -> Result<Self, String> {
         let saved = load_connection(&connection_path())?;
         Self::resolve(saved.as_ref(), |name| std::env::var(name).ok())
-    }
-
-    pub fn local_from_env() -> Result<Self, String> {
-        Self::resolve(None, |name| match name {
-            "SYNC_URL" | "SYNC_TOKEN" => None,
-            _ => std::env::var(name).ok(),
-        })
     }
 
     fn resolve(
@@ -219,7 +199,6 @@ impl Config {
                 ),
             };
         Ok(Self {
-            bind_addr: env_opt("BIND_ADDR").unwrap_or_else(|| "127.0.0.1:8788".to_string()),
             tokscale_home: env_opt("TOKSCALE_HOME"),
             clients,
             pricing,
@@ -227,7 +206,6 @@ impl Config {
             use_env_roots: env_opt("TOKSCALE_USE_ENV_ROOTS")
                 .map(|v| v != "false" && v != "0")
                 .unwrap_or(true),
-            api_token: env_opt("TOKSCALE_API_TOKEN"),
             sync_url,
             sync_token,
         })

@@ -4,11 +4,58 @@
 //! use camelCase on the wire for the Cloudflare Worker ingest endpoint.
 
 use crate::device::DeviceInfo;
+use crate::scan::Snapshot;
 use chrono::{Local, Timelike};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use tokscale_core::sessions::UnifiedMessage;
-use tokscale_core::{DailyContribution, DataSummary, TokenBreakdown};
+use tokscale_core::{
+    aggregate_by_date, calculate_summary, DailyContribution, DataSummary, TokenBreakdown,
+};
+
+/// Build the complete cloud upload without retaining raw records after the scan.
+pub fn build_payload(snapshot: Snapshot, device: &DeviceInfo) -> TsExport {
+    let hourly = aggregate_hourly(&snapshot.messages);
+    let daily = aggregate_by_date(snapshot.messages);
+    let summary = calculate_summary(&daily);
+    let mut credits = BTreeMap::<String, f64>::new();
+    for row in snapshot.credits {
+        *credits.entry(row.date).or_default() += row.credits;
+    }
+    let contributions: Vec<_> = daily
+        .iter()
+        .map(|day| {
+            to_ts_daily(
+                day,
+                snapshot.pricing_loaded,
+                credits.get(&day.date).copied().filter(|value| *value > 0.0),
+            )
+        })
+        .collect();
+    let start = contributions
+        .iter()
+        .map(|day| day.date.as_str())
+        .min()
+        .unwrap_or("")
+        .to_string();
+    let end = contributions
+        .iter()
+        .map(|day| day.date.as_str())
+        .max()
+        .unwrap_or("")
+        .to_string();
+    TsExport {
+        meta: TsExportMeta {
+            generated_at: chrono::Utc::now().to_rfc3339(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            date_range: TsDateRange { start, end },
+        },
+        device: device.clone(),
+        summary,
+        contributions,
+        hourly,
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

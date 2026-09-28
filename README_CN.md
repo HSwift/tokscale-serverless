@@ -12,7 +12,6 @@
 - **自动采集与同步**：首次输入 Worker 地址和 token，验证后保存；后续启动自动读取配置，默认每 60 秒扫描并同步。
 - **可自行部署**：API、数据库和控制台运行在自己的 Cloudflare 账号下，通过共享 token 接收设备上报。
 - **多平台采集器**：提供 Linux x86_64、Windows x86_64、macOS Intel 和 Apple Silicon 构建目标。
-- **本地查询与导出**：提供 HTTP API，支持本机统计查询、聚合数据导出和手动刷新。
 - **Qoder 支持**：在上游解析能力之外增加 Qoder 数据源，单独统计 credits，避免与美元费用混合。
 
 支持的数据源以当前锁定版本的 `tokscale-core` 为准。部分客户端需要先按上游说明生成本地缓存或导出数据，采集器读取这些已有数据。
@@ -31,7 +30,7 @@ flowchart LR
 
 | 组件 | 目录 | 职责 |
 | --- | --- | --- |
-| 采集器 | [`client/`](client/) | Rust + Axum，解析本地数据、提供本地 API、定时上报 |
+| 采集器 | [`client/`](client/) | Rust，解析本地数据、定时上报 |
 | 云端 API | [`worker/api/`](worker/api/) | 验证身份、接收上报、读写 D1、查询汇总结果 |
 | 网页控制台 | [`worker/console/`](worker/console/) | 静态统计页面，通过 Service Binding 查询 API，并为 Access 登录用户生成安装命令 |
 | 数据库迁移 | [`worker/api/migrations/`](worker/api/migrations/) | 设备、每日/小时用量、credits 和已部署的 API 地址的表结构 |
@@ -40,7 +39,7 @@ flowchart LR
 
 ### 数据与同步方式
 
-采集器启动后立即扫描一次，之后按配置间隔重新扫描，并向 `/api/ingest` 上传聚合结果。云端按「设备、日期、客户端、模型」更新统计行，同一设备重复上报不会重复累加。同步失败会记录日志，本地查询仍可使用，下次扫描后再次尝试同步。
+采集器启动后立即扫描一次，之后按配置间隔重新扫描，并向 `/api/ingest` 上传聚合结果。云端按「设备、日期、客户端、模型」更新统计行，同一设备重复上报不会重复累加。同步失败会记录日志，下次扫描后再次尝试同步。采集器仅主动请求云端，不监听本地端口。
 
 小时汇总在上述维度上增加「小时（0–23）」，包含输入、输出、缓存读写和推理五类 token。日期与小时沿用各采集主机的本地时区，与热力图一致；不同时区的主机不会被转换到统一时区。旧采集器仍可上报每日总量，升级并同步后可从保留的本地记录补齐小时数据；没有有效时间戳的记录仅计入每日总量。
 
@@ -93,7 +92,6 @@ Windows PowerShell：
 | --- | --- |
 | `connect [WORKER_URL]` | 验证并保存连接，也用于修改地址或 token；失败时保留旧配置 |
 | `run` | 使用已有连接持续采集、同步；配置缺失时退出，不等待交互输入 |
-| `local` | 仅采集和提供本地 API，忽略云端连接 |
 | `service <COMMAND>` | 安装和管理 Linux systemd 用户服务或 macOS LaunchAgent |
 | `--help` | 显示命令说明和当前配置文件路径 |
 
@@ -171,19 +169,17 @@ Fork 本仓库。在 Cloudflare 中创建名为 `tokscale-serverless` 的 D1 数
 
 | 变量 | 用途与默认行为 |
 | --- | --- |
-| `BIND_ADDR` | 本地 API 监听地址，默认 `127.0.0.1:8788` |
 | `TOKSCALE_CONFIG_DIR` | 设备配置、连接配置和上游缓存目录 |
 | `TOKSCALE_HOME` | 扫描主目录，默认当前用户主目录 |
 | `TOKSCALE_CLIENTS` | 可选，逗号分隔的客户端列表，如 `claude,codex,qoder` |
 | `TOKSCALE_PRICING` | `cached`（默认）、`remote` 或 `off` |
-| `TOKSCALE_API_TOKEN` | 可选，保护本地 `/api/*`；与云端 `INGEST_TOKEN` 用途不同 |
 | `REFRESH_INTERVAL_SECS` | 覆盖采集间隔；首次连接默认 `60`，`0` 表示关闭定时扫描 |
-| `SYNC_URL` / `SYNC_TOKEN` | 覆盖已保存的连接；覆盖 URL 时需同时提供 token；空 `SYNC_URL` 关闭同步 |
+| `SYNC_URL` / `SYNC_TOKEN` | 覆盖已保存的连接；覆盖 URL 时需同时提供 token；空 `SYNC_URL` 清除本次运行的连接，采集器将无法启动 |
 | `TOKSCALE_USE_ENV_ROOTS` | 默认 `true`；设为 `false` 后忽略客户端来源目录的环境变量覆盖 |
 | `TOKSCALE_DEVICE_ID` / `TOKSCALE_DEVICE_NAME` | 可选，覆盖设备 ID 或显示名称；通常保留自动生成的 ID |
 | `TOKSCALE_QODER_COEFFS` | 用户实测的 Qoder 系数文件路径；默认读取 `device.json` 同目录下的 `qoder-coeffs.json`，不提供内置系数 |
 
-环境变量优先于已保存的配置。直接运行时的覆盖不会写入文件；执行 `connect` 时提供的连接和间隔参数会在验证成功后保存。仅本地采集且未指定间隔时，默认只在启动时扫描一次。
+环境变量优先于已保存的配置。直接运行时的覆盖不会写入文件；执行 `connect` 时提供的连接和间隔参数会在验证成功后保存。
 
 价格默认从本地缓存加载；首次没有缓存时，可使用 `TOKSCALE_PRICING=remote` 获取价格。费用属于用量估算，不等同于服务商账单。
 
@@ -219,7 +215,7 @@ Linux 和 macOS 均使用以下命令，以日常用户身份执行。将 `./tok
 ~/.local/bin/tokscale-client service logs
 ```
 
-`install` 自动将程序复制到 `~/.local/bin/tokscale-client`，注册并立即启动服务，复用 `device.json` 中的连接。安装前先停止前台运行的采集器，避免端口冲突。无需下载整个仓库，也无需重新输入 token。
+`install` 自动将程序复制到 `~/.local/bin/tokscale-client`，注册并立即启动服务，复用 `device.json` 中的连接。安装前先停止前台运行的采集器，避免重复运行。无需下载整个仓库，也无需重新输入 token。
 
 - **Linux：**在 `$XDG_CONFIG_HOME/systemd/user`（默认 `~/.config/systemd/user`）安装 `tokscale-client.service`，并尝试启用 lingering，使其开机启动、退出登录后仍可运行。如果权限不足，按提示执行 `sudo loginctl enable-linger "$USER"`。日志写入 journal。
 - **macOS：**安装 `~/Library/LaunchAgents/io.tokscale.collector.plist`，登录后自动启动，退出登录时停止。日志写入 `~/Library/Logs/tokscale-client.log`。
@@ -273,9 +269,7 @@ cargo run --locked -p tokscale-client -- connect http://127.0.0.1:18787
 cargo run --locked -p tokscale-client -- run
 ```
 
-此时 API 为 `http://127.0.0.1:18787`，控制台为 `http://127.0.0.1:8789`，采集器本地 API 为 `http://127.0.0.1:8788`。API 与控制台同时运行时，Wrangler 会连接本地 Service Binding。开发连接会覆盖当前配置中的连接地址；需要与生产配置并存时，在执行 `connect` 和 `run` 的终端中设置独立的 `TOKSCALE_CONFIG_DIR`。
-
-只查看本机统计可执行 `cargo run --locked -p tokscale-client -- local`。客户端查询接口包括 `/health`、`/api/summary`、`/api/daily`、`/api/models`、`/api/clients`、`/api/sessions`、`/api/export`，以及用于手动扫描的 `POST /api/refresh`。
+此时 API 为 `http://127.0.0.1:18787`，控制台为 `http://127.0.0.1:8789`。API 与控制台同时运行时，Wrangler 会连接本地 Service Binding。开发连接会覆盖当前配置中的连接地址；需要与生产配置并存时，在执行 `connect` 和 `run` 的终端中设置独立的 `TOKSCALE_CONFIG_DIR`。
 
 ### 验证与发布
 
@@ -293,7 +287,7 @@ npm --prefix worker run build
 
 云端服务使用上文的 Cloudflare Workers Builds，构建环境为 Node.js 24。`npm --prefix worker run build` 可在本地生成两个 Worker 的 bundle，输出位于 `worker/dist/`；该命令使用 Wrangler `--dry-run`，不会部署线上服务。`check` 只使用本地数据库，`deploy:api` 则会迁移远程 D1 并部署 API，`deploy:console` 部署控制台。
 
-采集器构建包只包含可执行文件。用户配置在运行时创建；`.dev.vars`、Wrangler 本地数据库和构建目录已被 Git 忽略。采集器统计快照保存在内存，上游解析器使用本地缓存，跨主机历史汇总保存在 D1。
+采集器构建包只包含可执行文件。用户配置在运行时创建；`.dev.vars`、Wrangler 本地数据库和构建目录已被 Git 忽略。采集器在内存中处理每次扫描，上游解析器使用本地缓存，跨主机历史汇总保存在 D1。
 
 ## 常见问题
 
