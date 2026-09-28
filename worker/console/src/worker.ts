@@ -1,9 +1,9 @@
 /**
  * tokscale-serverless-console: static stats page + API proxy.
  *
- * Assets serve the page; API requests and installation scripts are forwarded
- * to the API Worker over a service binding, preserving the requested origin.
- * Collector endpoints always carry the caller's credentials. Until Access fronts this
+ * Assets serve the page; GET/HEAD /api/* (never /api/ingest) is forwarded to
+ * the API Worker over a service binding. Collectors use the API domain directly.
+ * Until Access fronts this
  * worker the browser carries no credential, so the console injects the shared
  * bearer token server-side for those read-only calls. Once Access is on, each
  * request arrives with Cf-Access-Jwt-Assertion, which is forwarded untouched —
@@ -32,15 +32,9 @@ export function routeConsoleRequest(
 	env: ConsoleEnv,
 ): Response | Promise<Response> {
 	const pathname = new URL(request.url).pathname;
-	if (pathname === "/install.sh" || pathname === "/install.ps1") {
-		return request.method === "GET" ? env.API.fetch(request) : notFound();
-	}
-	if (pathname === "/api/ingest") {
-		return request.method === "POST" ? env.API.fetch(request) : notFound();
-	}
 	if (pathname === "/api" || pathname.startsWith("/api/")) {
 		const readOnly = request.method === "GET" || request.method === "HEAD";
-		if (!readOnly) {
+		if (!readOnly || pathname === "/api/ingest") {
 			return notFound();
 		}
 		const hasCredential =

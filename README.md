@@ -22,19 +22,19 @@ Supported data sources depend on the pinned version of `tokscale-core`. Some cli
 
 ```mermaid
 flowchart LR
-    A[Host A · Collector] -->|HTTPS sync| Console[Console Worker]
-    B[Host B · Collector] -->|HTTPS sync| Console
-    C[Host C · Collector] -->|HTTPS sync| Console
+    A[Host A · Collector] -->|HTTPS sync| API[API Worker]
+    B[Host B · Collector] -->|HTTPS sync| API
+    C[Host C · Collector] -->|HTTPS sync| API
     API --> DB[(Cloudflare D1)]
-    Browser[Browser] --> Console
-    Console -->|Service Binding| API[API Worker]
+    Browser[Browser] --> Console[Console Worker]
+    Console -->|Service Binding queries| API
 ```
 
 | Component | Directory | Responsibilities |
 | --- | --- | --- |
 | Collector | [`client/`](client/) | Rust; parses local data and uploads on a schedule |
 | Cloud API | [`worker/api/`](worker/api/) | Authenticates requests, receives uploads, reads and writes D1, and queries aggregated usage |
-| Web console | [`worker/console/`](worker/console/) | Static dashboard; forwards API calls, installation scripts, and uploads through a Service Binding |
+| Web console | [`worker/console/`](worker/console/) | Static dashboard and API queries through a Service Binding; generates commands for installation from the API domain |
 | Database migrations | [`worker/api/migrations/`](worker/api/migrations/) | Schemas for devices, daily/hourly usage, and credits |
 
 The console uses **Workers Static Assets**. It and the API are separate Workers; no separate Cloudflare Pages project is required.
@@ -55,13 +55,13 @@ Deploy the backend as described below and have your **API Worker URL** and `INGE
 
 ### Download the collector
 
-Click the **download icon beside the theme toggle** to open the installation dialog. Choose your OS/architecture, then download the latest published GitHub Release or copy the installation command: Bash on Linux/macOS, PowerShell on Windows. Commands use the current console domain and include `token`, `type`, and `version` query parameters. For example:
+Click the **download icon beside the theme toggle** to open the installation dialog. Choose your OS/architecture, then download the latest published GitHub Release or copy the installation command: Bash on Linux/macOS, PowerShell on Windows. Commands use the API URL configured at console build time and include `token`, `type`, and `version` query parameters. For example:
 
 ```bash
-curl -fsSL 'https://your-console.example.com/install.sh?token=YOUR_TOKEN&type=linux&version=v0.2' | bash
+curl -fsSL 'https://your-api.example.com/install.sh?token=YOUR_TOKEN&type=linux&version=v0.2' | bash
 ```
 
-The API validates `INGEST_TOKEN` before returning a script with the connection URL and token embedded. Installation and subsequent synchronization use the console domain; no separate URL variable is needed. Commands are reusable, but their token may remain in shell history or request logs.
+The API validates `INGEST_TOKEN` before returning a script with the connection URL and token embedded. Installation and subsequent synchronization use the API domain and do not require a console Access login. Commands are reusable, but their token may remain in shell history or request logs.
 
 The installer verifies `SHA256SUMS`, uses `connect` to save the connection, and installs under `~/.local/bin` (Linux/macOS) or `%LOCALAPPDATA%\Programs\tokscale` (Windows). Existing device identity is preserved. Follow the printed `run` command to start collection, or use `~/.local/bin/tokscale-client service install` on Linux/macOS for [background operation](#run-in-the-background).
 
@@ -92,7 +92,7 @@ Windows PowerShell:
 .\tokscale-client.exe run
 ```
 
-Replace the example URL with your API Worker URL or console URL (with the Access path exceptions below), and enter the `INGEST_TOKEN` configured during deployment. You can use either the Worker root URL or the full `/api/ingest` URL. After successful verification, `connect` saves the configuration and exits. Run `run` to start collecting. Token input is hidden.
+Replace the example URL with your API Worker URL and enter the `INGEST_TOKEN` configured during deployment. You can use either the Worker root URL or the full `/api/ingest` URL. After successful verification, `connect` saves the configuration and exits. Run `run` to start collecting. Token input is hidden.
 
 You can also launch the collector in a terminal without arguments. If no connection is configured, it prompts for the URL and token, then starts collecting immediately after verification. Subsequent launches use the saved configuration without prompting again.
 
@@ -123,7 +123,7 @@ In **Workers & Pages**, import your fork to create the **API Worker first**, the
 | Root directory | `/worker/api/` | `/worker/console/` |
 | Build command | `npm --prefix .. ci && npm --prefix .. run check && npm --prefix .. run build:api` | `npm --prefix .. ci && npm --prefix .. run check && npm --prefix .. run build:console` |
 | Deploy command | `npm --prefix .. run deploy:api` | `npm --prefix .. run deploy:console` |
-| Build variables | `NODE_VERSION=24`, `SKIP_DEPENDENCY_INSTALL=1` | Same |
+| Build variables | `NODE_VERSION=24`, `SKIP_DEPENDENCY_INSTALL=1` | Same, plus `PUBLIC_API_URL=https://your-api.example.com` |
 
 Disable builds for non-production branches unless you configure separate preview resources. Keep the Worker names above, or update the corresponding Wrangler `name` fields and the console's `API` Service Binding together.
 
@@ -137,7 +137,9 @@ In **each Worker → Settings → Variables and Secrets**, add the same **Secret
 
 In **Settings → Domains & Routes → Add → Custom Domain**, bind a domain to the console and optionally another to the API. The console requires a custom domain; its `workers.dev` and version URLs are disabled by default. The API can use its `workers.dev` URL. Domains are managed in Cloudflare; no `CUSTOM_DOMAIN` variable or domain in Git is needed.
 
-Installation commands use the current console domain. The API derives the connection URL from the incoming script request; no domain is stored in D1, and no previous collector upload is needed.
+In **Console Worker → Settings → Builds → Build variables and secrets**, add a text variable `PUBLIC_API_URL` with the API's root URL, for example `https://your-api.example.com` or its `workers.dev` URL. Do not include `/api`, `/api/ingest`, or a token. The console build embeds this public address in the installer UI; rebuild/redeploy the console after changing it. Keep `INGEST_TOKEN` as a runtime secret on the Workers. The build command stays unchanged. Without `PUBLIC_API_URL`, downloads remain available, but the installation command is hidden.
+
+This address is only used for installation commands. Dashboard queries still use the existing Service Binding, so no browser CORS configuration is needed.
 
 ### 4. Protect the console with Access
 
@@ -152,8 +154,10 @@ Without Access, the console allows public read access to statistics. Before conn
    | `ACCESS_AUD` | The console Access application's Application Audience (AUD) |
 
    The API configuration uses `keep_vars: true` to preserve these dashboard values on deploy. When upgrading from an older configuration with placeholder `vars`, deploy the updated configuration first.
-3. For terminal installation and collector synchronization, add self-hosted applications on the **same console domain**, scoped to these exact paths: `/install.sh`, `/install.ps1`, `/api/me`, `/api/ingest`. Apply **Bypass → Include → Everyone** to these applications. More specific paths take precedence over the domain-wide application; keep the main dashboard's Allow policy and AUD unchanged. Only these four paths bypass browser login: the Worker still validates the installation query token or collector bearer token. Do not bypass `/api/*`. See [Access application paths](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/app-paths/).
-4. Keep `workers_dev: false` and `preview_urls: false` in [`worker/console/wrangler.jsonc`](worker/console/wrangler.jsonc). Verify that a signed-out browser reaches the dashboard login page and statistics load after signing in. The four machine endpoints should return `401` without credentials, rather than redirect to login (use POST for `/api/ingest`).
+3. Keep Access on the **console domain** and leave the **API domain** available to token-authenticated collectors without a browser login requirement. No console path Bypass rules are needed. Keep `workers_dev: false` and `preview_urls: false` in [`worker/console/wrangler.jsonc`](worker/console/wrangler.jsonc).
+4. Verify that a signed-out browser reaches the console login page and statistics load after signing in. On the API domain, `/install.sh`, `/install.ps1`, `/api/me`, and POST `/api/ingest` should return `401` without credentials, rather than redirect to login.
+
+If a collector previously saved the console URL, run `tokscale-client connect https://your-api.example.com` and restart it (`service restart` for managed services). Remove any console path Bypass applications added for the previous setup.
 
 Use the console's installation command on each host, or connect manually as described in [Quick start](#quick-start-connect-a-collector). Subsequent pushes deploy updates automatically and retain runtime secrets; if you rotate `INGEST_TOKEN`, update both Workers and every collector.
 
@@ -268,7 +272,7 @@ npm --prefix worker run dev -- --ip 127.0.0.1 --port 18787
 
 ```bash
 # Console
-npm --prefix worker run dev:console
+PUBLIC_API_URL=http://127.0.0.1:18787 npm --prefix worker run dev:console
 ```
 
 ```bash
@@ -302,7 +306,8 @@ Collector archives contain only the executable. User configuration is created at
 | Symptom | What to check |
 | --- | --- |
 | Connection returns `401` | Confirm that the collector's token matches the API's `INGEST_TOKEN` |
-| Installation or synchronization redirects to login | Check the four Access path exceptions in deployment step 4 |
+| Installation or synchronization redirects to login | Set `PUBLIC_API_URL` to the API domain, keep that domain outside browser Access, and rebuild the console |
+| Installation command is missing | Configure `PUBLIC_API_URL` in the Console Worker build variables and rebuild |
 | The API returns `auth_not_configured` | Set the `INGEST_TOKEN` secret on the API Worker; a local `.dev.vars` file does not configure production secrets |
 | Console queries return `401` | Check that both Workers use the same token. If using Access, also check the team domain and AUD |
 | A table is missing | Confirm that `migrations apply DB --remote` was run against the correct D1 database |

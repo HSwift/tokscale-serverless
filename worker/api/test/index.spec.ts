@@ -2,7 +2,6 @@ import { env, SELF } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import schema from "../migrations/0001_init.sql?raw";
 import hourlySchema from "../migrations/0002_hourly_and_install.sql?raw";
-import { routeConsoleRequest } from "../../console/src/worker";
 
 const AUTH = { Authorization: "Bearer test-token" };
 
@@ -125,27 +124,6 @@ describe("tokscale-serverless worker", () => {
 		expect(summary.summary.input).toBe(3225);
 		expect(summary.summary.messages).toBe(13);
 		expect(summary.credits).toBeCloseTo(897.0);
-	});
-
-	it("connects and uploads through the console only with the collector's valid token", async () => {
-		const consoleEnv = {
-			API: { fetch: (request: Request) => SELF.fetch(request) },
-			ASSETS: { fetch: () => new Response("unexpected asset fallback", { status: 500 }) },
-			INGEST_TOKEN: "test-token",
-		};
-		for (const token of [null, "wrong-token", "test-token"]) {
-			const headers: Record<string, string> = { "content-type": "application/json" };
-			if (token) headers.authorization = `Bearer ${token}`;
-			const me = await routeConsoleRequest(new Request("https://console.example/api/me", { headers }), consoleEnv);
-			expect(me.status).toBe(token === "test-token" ? 200 : 401);
-			const ingest = await routeConsoleRequest(new Request("https://console.example/api/ingest", {
-				method: "POST", headers, body: JSON.stringify(EXPORT_PAYLOAD),
-			}), consoleEnv);
-			expect(ingest.status).toBe(token === "test-token" ? 200 : 401);
-		}
-		const summary = await (await SELF.fetch("https://example.com/api/summary", { headers: AUTH })).json();
-		expect(summary.summary.input).toBe(3225);
-		expect(summary.summary.devices).toBe(1);
 	});
 
 	it("aggregates per model via /api/models", async () => {

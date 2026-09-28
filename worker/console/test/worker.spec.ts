@@ -53,50 +53,34 @@ describe("console router", () => {
 		expect(assertion).toBe("real.jwt.here");
 	});
 
-	it("forwards collector and installer requests with their original URL, body, and credentials", async () => {
-		for (const authorization of [null, "Bearer collector-token"]) {
-			for (const path of ["/api/ingest", "/api/me", "/install.sh?token=collector-token&type=linux&version=v0.2", "/install.ps1?token=collector-token&type=windows&version=v0.2"]) {
-				const ingest = path === "/api/ingest";
-				const request = new Request(`https://console.example${path}`, {
-					method: ingest ? "POST" : "GET",
-					headers: authorization ? { authorization } : {},
-					body: ingest ? '{"device":{"id":"test"}}' : undefined,
-				});
-				let forwarded: Request | undefined;
-				const response = await routeConsoleRequest(request, makeEnv(req => {
-					forwarded = req;
-					return new Response("api reached");
-				}));
-				expect(await response.text()).toBe("api reached");
-				expect(forwarded?.url).toBe(request.url);
-				expect(forwarded?.headers.get("authorization")).toBe(authorization);
-				if (ingest) expect(await forwarded?.text()).toBe('{"device":{"id":"test"}}');
-			}
-		}
-	});
-
-	it("rejects unsupported methods before reaching the API", async () => {
+	it("does not forward installation scripts or collector uploads", async () => {
 		let apiCalled = false;
 		const env = makeEnv(() => {
 			apiCalled = true;
 			return new Response("{}");
 		});
-		const install = await routeConsoleRequest(
-			new Request("https://console.example/install.sh", { method: "POST" }),
-			env,
-		);
-		expect(install.status).toBe(404);
-		const put = await routeConsoleRequest(
-			new Request("https://console.example/api/summary", { method: "PUT" }),
-			env,
-		);
-		expect(put.status).toBe(404);
-		const getIngest = await routeConsoleRequest(
-			new Request("https://console.example/api/ingest"),
-			env,
-		);
-		expect(getIngest.status).toBe(404);
+		env.ASSETS.fetch = () => new Response("Not found", { status: 404 });
+		for (const [path, method] of [
+			["/install.sh", "GET"], ["/install.ps1", "GET"],
+			["/api/ingest", "POST"], ["/api/ingest", "GET"], ["/api/summary", "PUT"],
+		]) {
+			const res = await routeConsoleRequest(new Request(`https://console.example${path}`, { method }), env);
+			expect(res.status).toBe(404);
+		}
 		expect(apiCalled).toBe(false);
+	});
+
+	it("never substitutes the console token for /api/me credentials", async () => {
+		for (const authorization of [null, "Bearer collector-token"]) {
+			let seen: string | null = "unset";
+			await routeConsoleRequest(new Request("https://console.example/api/me", {
+				headers: authorization ? { authorization } : {},
+			}), makeEnv(req => {
+				seen = req.headers.get("authorization");
+				return new Response("{}");
+			}));
+			expect(seen).toBe(authorization);
+		}
 	});
 
 	it("passes /api reads through when no token is configured", async () => {

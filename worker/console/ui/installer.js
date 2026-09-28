@@ -2,16 +2,17 @@ const $ = selector => document.querySelector(selector);
 let release;
 let loading = false;
 
-export function installCommand(platform, origin) {
-	if (!platform?.installPath) return "";
-	const url = new URL(platform.installPath, origin).href;
+export function installCommand(platform, apiUrl) {
+	if (!platform?.installPath || !apiUrl) return "";
+	const url = new URL(platform.installPath, apiUrl).href;
 	if (platform.id === "windows") return `irm '${url.replaceAll("'", "''")}' | iex`;
 	return `curl -fsSL '${url.replaceAll("'", "'\\''")}' | bash`;
 }
 
 function selectPlatform() {
 	const platform = release.platforms.find(item => item.id === $("#install-platform").value);
-	const command = installCommand(platform, window.location.origin);
+	const apiUrl = process.env.PUBLIC_API_URL;
+	const command = installCommand(platform, apiUrl);
 	const download = $("#download-link");
 	download.classList.toggle("disabled", !platform);
 	download.setAttribute("aria-disabled", String(!platform));
@@ -22,6 +23,7 @@ function selectPlatform() {
 	$("#command-label").textContent = platform?.id === "windows" ? "在 PowerShell 中执行" : "在终端执行";
 	$("#copy-install").textContent = "复制命令";
 	$("#install-status").textContent = command ? "执行命令即可下载并保存连接配置，随后按终端提示启动采集。"
+		: !apiUrl ? "请在 Console 的 Build variables 中设置 PUBLIC_API_URL 并重新构建；也可下载后手动连接。"
 		: "安装命令暂不可用，请确认 API 部署已完成。";
 }
 

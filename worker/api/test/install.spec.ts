@@ -2,8 +2,7 @@ import { env, SELF } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { installerScript, releases } from "../src/install";
 import type { Env } from "../src/auth";
-import { installCommand } from "../../console/public/installer.js";
-import { routeConsoleRequest } from "../../console/src/worker";
+import { installCommand } from "../../console/ui/installer.js";
 
 const installEnv = { ...env, INGEST_TOKEN: "test-token" } as Env;
 const fixture = { tag_name: "v0.2", draft: false, prerelease: false, assets: [
@@ -11,13 +10,13 @@ const fixture = { tag_name: "v0.2", draft: false, prerelease: false, assets: [
 ].map(target => ({ name: `tokscale-client-${target}` })) };
 
 function installerUrl(type = "linux", token = "test-token", version = "v0.2") {
-	return new URL(`https://usage.custom.example/install.${type === "windows" ? "ps1" : "sh"}?${new URLSearchParams({ token, type, version })}`);
+	return new URL(`https://api.custom.example/install.${type === "windows" ? "ps1" : "sh"}?${new URLSearchParams({ token, type, version })}`);
 }
 
 afterEach(() => vi.restoreAllMocks());
 
 describe("collector installation", () => {
-	it("uses the current console domain for every platform without a database lookup or previous upload", async () => {
+	it("uses the configured API domain for every platform without a database lookup or previous upload", async () => {
 		vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json(fixture));
 		const prepare = vi.fn(() => { throw new Error("Installation must not depend on D1"); });
 		const res = await releases({ ...installEnv, DB: { prepare } } as unknown as Env);
@@ -39,19 +38,22 @@ describe("collector installation", () => {
 		}
 	});
 
-	it("embeds the requested origin and token in reusable scripts through the console binding", async () => {
+	it("embeds the API origin and token in reusable scripts fetched directly from the API", async () => {
 		for (let i = 0; i < 2; i++) {
-			const res = await routeConsoleRequest(new Request(installerUrl()), {
-				API: { fetch: request => SELF.fetch(request) },
-				ASSETS: { fetch: () => new Response("unexpected asset fallback", { status: 500 }) },
-				INGEST_TOKEN: "console-token-must-not-be-injected",
-			});
+			const res = await SELF.fetch(installerUrl().href);
 			expect(res.status).toBe(200);
 			expect(res.headers.get("cache-control")).toBe("no-store");
 			const script = await res.text();
-			expect(script).toContain(`SYNC_URL='https://usage.custom.example' SYNC_TOKEN='test-token' "$install_tmp/tokscale-client" connect`);
+			expect(script).toContain(`SYNC_URL='https://api.custom.example' SYNC_TOKEN='test-token' "$install_tmp/tokscale-client" connect`);
 			expect(script).toContain("SHA256SUMS");
 		}
+	});
+
+	it("does not generate a command without a configured API URL", () => {
+		const platform = { id: "linux", installPath: "/install.sh?token=test-token&type=linux&version=v0.2" };
+		expect(installCommand(platform, "")).toBe("");
+		expect(installCommand(platform, undefined)).toBe("");
+		expect(installCommand(platform, "http://127.0.0.1:18787")).toContain("http://127.0.0.1:18787/install.sh?");
 	});
 
 	it("never returns a script or token without valid credentials", async () => {
@@ -65,7 +67,7 @@ describe("collector installation", () => {
 				expect(await res.text()).not.toContain("test-token");
 			}
 		}
-		expect((await SELF.fetch("https://usage.custom.example/api/releases")).status).toBe(401);
+		expect((await SELF.fetch("https://api.custom.example/api/releases")).status).toBe(401);
 		expect(installerScript(installerUrl(), { ...installEnv, INGEST_TOKEN: undefined }).status).toBe(503);
 	});
 
@@ -83,7 +85,7 @@ describe("collector installation", () => {
 		vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json(fixture));
 		const body = await (await releases({ ...installEnv, INGEST_TOKEN: token })).json<any>();
 		for (const platform of body.platforms) {
-			const url = new URL(platform.installPath, "https://usage.custom.example");
+			const url = new URL(platform.installPath, "https://api.custom.example");
 			expect(url.searchParams.get("token")).toBe(token);
 			expect(url.hash).toBe("");
 			expect([...url.searchParams.keys()]).toEqual(["token", "type", "version"]);

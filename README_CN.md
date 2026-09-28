@@ -20,19 +20,19 @@
 
 ```mermaid
 flowchart LR
-    A[主机 A · 采集器] -->|HTTPS 同步| Console[Console Worker]
-    B[主机 B · 采集器] -->|HTTPS 同步| Console
-    C[主机 C · 采集器] -->|HTTPS 同步| Console
+    A[主机 A · 采集器] -->|HTTPS 同步| API[API Worker]
+    B[主机 B · 采集器] -->|HTTPS 同步| API
+    C[主机 C · 采集器] -->|HTTPS 同步| API
     API --> DB[(Cloudflare D1)]
-    Browser[浏览器] --> Console
-    Console -->|Service Binding| API[API Worker]
+    Browser[浏览器] --> Console[Console Worker]
+    Console -->|Service Binding 查询| API
 ```
 
 | 组件 | 目录 | 职责 |
 | --- | --- | --- |
 | 采集器 | [`client/`](client/) | Rust，解析本地数据、定时上报 |
 | 云端 API | [`worker/api/`](worker/api/) | 验证身份、接收上报、读写 D1、查询汇总结果 |
-| 网页控制台 | [`worker/console/`](worker/console/) | 静态统计页面，通过 Service Binding 转发 API 查询、安装脚本及采集上报 |
+| 网页控制台 | [`worker/console/`](worker/console/) | 静态统计页面，通过 Service Binding 查询 API，生成使用 API 域名的安装命令 |
 | 数据库迁移 | [`worker/api/migrations/`](worker/api/migrations/) | 设备、每日/小时用量及 credits 的表结构 |
 
 控制台通过 **Workers Static Assets** 部署，与 API 是两个独立 Worker，无需另外创建 Cloudflare Pages 项目。
@@ -53,13 +53,13 @@ flowchart LR
 
 ### 获取程序
 
-点击**主题按钮旁的下载图标**打开安装弹窗，选择系统和架构后下载最新正式 Release，或复制安装命令：Linux/macOS 使用 Bash，Windows 使用 PowerShell。命令使用当前控制台域名，携带 `token`、`type`、`version` 参数，例如：
+点击**主题按钮旁的下载图标**打开安装弹窗，选择系统和架构后下载最新正式 Release，或复制安装命令：Linux/macOS 使用 Bash，Windows 使用 PowerShell。命令使用控制台构建时配置的 API 地址，携带 `token`、`type`、`version` 参数，例如：
 
 ```bash
-curl -fsSL 'https://your-console.example.com/install.sh?token=YOUR_TOKEN&type=linux&version=v0.2' | bash
+curl -fsSL 'https://your-api.example.com/install.sh?token=YOUR_TOKEN&type=linux&version=v0.2' | bash
 ```
 
-API 校验 `INGEST_TOKEN` 后才返回内含连接地址和 token 的脚本。安装及后续同步均使用控制台域名，无需额外指定 URL。命令可以重复执行，但其中的 token 可能保留在 shell 历史或请求日志中。
+API 校验 `INGEST_TOKEN` 后才返回内含连接地址和 token 的脚本。安装及后续同步均直接访问 API 域名，无需通过控制台的 Access 登录。命令可以重复执行，但其中的 token 可能保留在 shell 历史或请求日志中。
 
 安装脚本校验 `SHA256SUMS`，通过 `connect` 保存连接配置，保留已有设备身份。程序安装到 Linux/macOS 的 `~/.local/bin` 或 Windows 的 `%LOCALAPPDATA%\Programs\tokscale`。按终端打印的 `run` 命令开始采集；Linux/macOS 也可执行 `~/.local/bin/tokscale-client service install` 注册[后台服务](#后台运行)。
 
@@ -90,7 +90,7 @@ Windows PowerShell：
 .\tokscale-client.exe run
 ```
 
-将示例地址替换为 API Worker 地址或已配置下文 Access 路径例外的控制台地址，输入部署时设置的 `INGEST_TOKEN`。地址可以是 Worker 根地址或完整的 `/api/ingest` 地址。`connect` 验证成功后保存配置并退出，随后执行 `run` 开始采集。token 输入不回显。
+将示例地址替换为自己的 API Worker 地址，输入部署时设置的 `INGEST_TOKEN`。地址可以是 Worker 根地址或完整的 `/api/ingest` 地址。`connect` 验证成功后保存配置并退出，随后执行 `run` 开始采集。token 输入不回显。
 
 也可以在终端不带参数启动：未配置连接时会交互式询问地址和 token，成功后直接进入采集。后续启动使用已保存的配置，无需再次输入。
 
@@ -121,7 +121,7 @@ Fork 本仓库。在 Cloudflare 中创建名为 `tokscale-serverless` 的 D1 数
 | Root directory | `/worker/api/` | `/worker/console/` |
 | Build command | `npm --prefix .. ci && npm --prefix .. run check && npm --prefix .. run build:api` | `npm --prefix .. ci && npm --prefix .. run check && npm --prefix .. run build:console` |
 | Deploy command | `npm --prefix .. run deploy:api` | `npm --prefix .. run deploy:console` |
-| Build variables | `NODE_VERSION=24`、`SKIP_DEPENDENCY_INSTALL=1` | 同左 |
+| Build variables | `NODE_VERSION=24`、`SKIP_DEPENDENCY_INSTALL=1` | 同左，另加 `PUBLIC_API_URL=https://your-api.example.com` |
 
 没有单独配置预览资源时，关闭非生产分支构建。保留上述 Worker 名称；如果改名，同时修改对应 Wrangler 的 `name` 和控制台的 `API` Service Binding。
 
@@ -135,7 +135,9 @@ Fork 本仓库。在 Cloudflare 中创建名为 `tokscale-serverless` 的 D1 数
 
 在 **Settings → Domains & Routes → Add → Custom Domain** 中为控制台绑定域名，API 域名按需绑定。控制台需要自定义域名，其 `workers.dev` 和版本预览地址默认关闭；API 可以直接使用 `workers.dev` 地址。域名在 Cloudflare 中管理，无需配置 `CUSTOM_DOMAIN`，也无需写入 Git。
 
-安装命令使用当前控制台域名，API 从安装脚本请求中取得连接地址，无需在 D1 中保存域名，也不依赖已有设备上报。
+在 **Console Worker → Settings → Builds → Build variables and secrets** 中添加文本变量 `PUBLIC_API_URL`，填写 API 根地址，例如 `https://your-api.example.com` 或其 `workers.dev` 地址，不要带 `/api`、`/api/ingest` 或 token。构建时会将这个公开地址写入安装界面，修改后需要重新构建并部署 Console。`INGEST_TOKEN` 仍只配置为 Worker 运行时 Secret，构建命令无需修改。未设置 `PUBLIC_API_URL` 时仍可下载程序，但不显示安装命令。
+
+这个地址只用于生成安装命令。页面统计查询仍走原有 Service Binding，无需配置浏览器跨域。
 
 ### 4. 用 Access 保护控制台
 
@@ -150,8 +152,10 @@ Fork 本仓库。在 Cloudflare 中创建名为 `tokscale-serverless` 的 D1 数
    | `ACCESS_AUD` | 控制台 Access 应用的 Application Audience（AUD） |
 
    API 配置通过 `keep_vars: true` 保留控制台中的变量。若从含占位 `vars` 的旧配置升级，先部署新版配置。
-3. 为终端安装及采集同步，在**同一个控制台域名**下添加限定路径的 Self-hosted 应用，精确覆盖 `/install.sh`、`/install.ps1`、`/api/me`、`/api/ingest`，策略选择 **Bypass → Include → Everyone**。更具体的路径应用优先于整个域名的应用，原控制台的 Allow 策略和 AUD 保持不变。仅这四条路径跳过浏览器登录，Worker 仍校验安装参数中的 token 或采集器的 bearer token；不要放行整个 `/api/*`。参见 [Access 路径规则](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/app-paths/)。
-4. 保持 [`worker/console/wrangler.jsonc`](worker/console/wrangler.jsonc) 中的 `workers_dev: false` 和 `preview_urls: false`。用未登录的浏览器确认控制台仍进入登录页，登录后统计正常。上述四个机器接口不带凭据时应返回 `401`，而非跳转登录页（`/api/ingest` 使用 POST 测试）。
+3. **控制台域名**继续由 Access 保护，**API 域名**保持供采集器使用 token 访问，不要求浏览器登录。无需为控制台添加路径 Bypass。保持 [`worker/console/wrangler.jsonc`](worker/console/wrangler.jsonc) 中的 `workers_dev: false` 和 `preview_urls: false`。
+4. 用未登录的浏览器确认控制台进入登录页，登录后统计正常。API 域名上的 `/install.sh`、`/install.ps1`、`/api/me` 和 POST `/api/ingest` 不带凭据时应返回 `401`，而非跳转登录页。
+
+如果采集器曾保存控制台地址，执行 `tokscale-client connect https://your-api.example.com` 后重启采集器（后台服务使用 `service restart`）。之前为控制台添加过路径 Bypass 应用的，可将其删除。
 
 随后在每台主机运行控制台生成的安装命令，或按[快速开始](#快速开始连接采集器)手动连接。后续推送会自动部署并保留运行时密钥；更换 `INGEST_TOKEN` 时，更新两个 Worker 和所有采集器。
 
@@ -266,7 +270,7 @@ npm --prefix worker run dev -- --ip 127.0.0.1 --port 18787
 
 ```bash
 # 控制台
-npm --prefix worker run dev:console
+PUBLIC_API_URL=http://127.0.0.1:18787 npm --prefix worker run dev:console
 ```
 
 ```bash
@@ -300,7 +304,8 @@ npm --prefix worker run build
 | 现象 | 排查方式 |
 | --- | --- |
 | 连接返回 `401` | 核对 API 的 `INGEST_TOKEN` 与采集器输入是否一致 |
-| 安装或同步跳转到登录页 | 核对 Access 的四条路径例外，参见部署步骤 4 |
+| 安装或同步跳转到登录页 | 将 `PUBLIC_API_URL` 设置为 API 域名，确认该域名不要求 Access 浏览器登录，重新构建 Console |
+| 没有显示安装命令 | 在 Console 的 Build variables 中配置 `PUBLIC_API_URL` 后重新构建 |
 | API 返回 `auth_not_configured` | 在 API Worker 上设置 `INGEST_TOKEN` secret，本地 `.dev.vars` 不会作为线上 secret 使用 |
 | 控制台查询返回 `401` | 核对两个 Worker 的 token；使用 Access 时核对 team domain 和 AUD |
 | 提示找不到表 | 确认对正确的 D1 执行了 `migrations apply DB --remote` |

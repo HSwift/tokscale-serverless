@@ -1,4 +1,4 @@
-import { initInstaller } from "./installer.js";
+import { initInstaller } from "./assets/installer.js";
 import { renderDailyCard, formatTokens, toolLabel, SERIES_COLORS } from "./assets/daily-card.js";
 
 const DAY_MS = 86_400_000;
