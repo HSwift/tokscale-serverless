@@ -81,6 +81,18 @@ body {
 .hourly-chart { height: 230px; width: 100%; margin-top: 20px; font-family: var(--mono); }
 .chart-placeholder { display: grid; place-items: center; height: 100%; margin: 0; color: var(--muted); font: 13px var(--sans); }
 .chart-note { margin: 12px 0 0; color: var(--muted); font-size: 12px; }
+.hourly-legend { list-style: none; padding: 0; margin: 12px 0 0; display: flex; flex-wrap: wrap; gap: 6px 20px; font-size: 12px; }
+.hourly-legend li { display: flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; }
+.hourly-legend .dot { width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0; }
+.hourly-legend .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hourly-legend .value { color: var(--muted); font: 11px var(--mono); white-space: nowrap; }
+.daily-number { overflow-wrap: anywhere; }
+.hourly-tooltip { background: var(--tooltip-bg); color: var(--tooltip-text); border: 1px solid var(--border-strong); border-radius: 8px; padding: 8px 10px; font-size: 11px; max-width: min(340px, calc(100vw - 48px)); }
+.hourly-tooltip p { margin: 0 0 4px; color: var(--tooltip-muted); }
+.hourly-tooltip ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 3px; }
+.hourly-tooltip li { display: flex; justify-content: space-between; gap: 12px; }
+.hourly-tooltip .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hourly-tooltip .value { white-space: nowrap; }
 .text-btn { display: inline-flex; align-items: center; justify-content: center; gap: 5px; border-radius: 7px; padding: 8px 12px; font: 500 12px var(--sans); text-decoration: none; cursor: pointer; white-space: nowrap; }
 .text-btn { color: var(--muted); background: var(--surface-muted); border: 1px solid var(--border); }
 .text-btn:hover { color: var(--text); border-color: var(--border-strong); }
@@ -325,7 +337,8 @@ body:has(.install-dialog[open]) { overflow: hidden; }
 	line-height: var(--cell);
 }
 
-.grid-scroll { overflow-x: auto; padding-bottom: 6px; scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
+/* Keep the outermost selection/focus outlines inside the scroll clip. */
+.grid-scroll { overflow-x: auto; min-width: 0; padding: 4px 4px 6px; margin: -4px -4px 0; scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
 
 .grid {
 	display: grid;
@@ -594,6 +607,7 @@ body:has(.install-dialog[open]) { overflow: hidden; }
 	.dow { display: none; }
 	.months { margin-left: 0; }
 	.stats { gap: 18px; }
+	.panel-head .chips { flex-basis: 100%; }
 }
 
 @media (prefers-reduced-motion: reduce) {

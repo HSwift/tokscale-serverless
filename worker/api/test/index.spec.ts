@@ -225,6 +225,60 @@ describe("tokscale-serverless worker", () => {
 });
 
 describe("hourly usage", () => {
+	it("groups hourly curves by device, tool, or model and intersects filters", async () => {
+		const date = "2026-09-25";
+		for (const [id, name, records] of [
+			["hourly_group_a", "Laptop", [
+				{ client: "codex", modelId: "model.with.dot", hour: 8, tokens: 100 },
+				{ client: "claude", modelId: "model.with.dot", hour: 8, tokens: 20 },
+				{ client: "qoder", modelId: "other-model", hour: 12, tokens: 60 },
+			]],
+			["hourly_group_b", "Server", [
+				{ client: "codex", modelId: "model.with.dot", hour: 8, tokens: 50 },
+				{ client: "qoder", modelId: "other-model", hour: 20, tokens: 40 },
+			]],
+		] as const) {
+			expect((await postIngest({
+				device: { id, name, hostname: "fallback-host" },
+				contributions: [{ date, clients: records.map(row => ({
+					client: row.client, modelId: row.modelId, tokens: { input: row.tokens },
+				})) }],
+				hourly: records.map(row => ({ date, ...row })),
+			})).status).toBe(200);
+		}
+		const query = async (params: string) => (await SELF.fetch(
+			`https://example.com/api/hourly?date=${date}&${params}`, { headers: AUTH },
+		)).json();
+		for (const [group, expected] of [
+			["devices", [["hourly_group_a", 180], ["hourly_group_b", 90]]],
+			["clients", [["codex", 150], ["qoder", 100], ["claude", 20]]],
+			["models", [["model.with.dot", 170], ["other-model", 100]]],
+		] as const) {
+			const result = await query(`group=${group}`);
+			expect(result).toMatchObject({ group, totalTokens: 270, hourlyTokens: 270, complete: true });
+			expect(result.entities.map((entity: { key: string; tokens: number }) => [entity.key, entity.tokens])).toEqual(expected);
+			for (const entity of result.entities) {
+				expect(entity.hours).toHaveLength(24);
+				expect(entity.hours[0]).toEqual({ hour: 0, tokens: 0 });
+			}
+			for (const hour of result.hours) {
+				expect(hour.tokens).toBe(result.entities.reduce((sum: number, entity: { hours: { tokens: number }[] }) => sum + entity.hours[hour.hour].tokens, 0));
+			}
+		}
+		const devices = await query("group=devices&client=qoder");
+		expect(devices.totalTokens).toBe(100);
+		expect(devices.entities.map((entity: { label: string }) => entity.label)).toEqual(["Laptop", "Server"]);
+		expect(devices.entities[0].hours[12].tokens).toBe(60);
+		expect(devices.entities[1].hours[20].tokens).toBe(40);
+		const filtered = await query("group=clients&deviceId=hourly_group_a&modelId=model.with.dot&client=codex");
+		expect(filtered).toMatchObject({ totalTokens: 100, hourlyTokens: 100, complete: true });
+		expect(filtered.entities).toHaveLength(1);
+		expect(filtered.entities[0].key).toBe("codex");
+		expect(filtered.hours[8].tokens).toBe(100);
+		expect((await query("group=models&client=missing-tool")).entities).toEqual([]);
+		expect((await SELF.fetch(`https://example.com/api/hourly?date=${date}&group=nope`, { headers: AUTH })).status).toBe(400);
+	});
+
 	it("keeps resends idempotent, fills 24 hours, and filters device/model", async () => {
 		const payload = {
 			device: { id: "dev_hourly" },

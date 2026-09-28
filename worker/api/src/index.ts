@@ -348,6 +348,13 @@ async function daily(url: URL, env: Env): Promise<Response> {
 async function hourly(url: URL, env: Env): Promise<Response> {
 	const date = url.searchParams.get("date") ?? "";
 	if (!isValidDate(date)) return error(400, "bad_request", "date must be YYYY-MM-DD");
+	const group = url.searchParams.get("group") ?? "devices";
+	if (group !== "devices" && group !== "clients" && group !== "models") {
+		return error(400, "bad_request", "group must be 'devices', 'clients' or 'models'");
+	}
+	const key = { devices: "device_id", clients: "client", models: "model_id" }[group];
+	const label = group === "devices" ? "COALESCE(devices.name, devices.hostname, device_id)" : key;
+	const join = group === "devices" ? "LEFT JOIN devices ON devices.id = hourly_rows.device_id" : "";
 	const clauses = ["date = ?"];
 	const binds = [date];
 	for (const [parameter, column] of [["deviceId", "device_id"], ["modelId", "model_id"], ["client", "client"]]) {
@@ -356,15 +363,29 @@ async function hourly(url: URL, env: Env): Promise<Response> {
 	}
 	const where = `WHERE ${clauses.join(" AND ")}`;
 	const [rows, dailyTotal] = await Promise.all([
-		env.DB.prepare(`SELECT hour, SUM(tokens) AS tokens FROM hourly_rows ${where} GROUP BY hour ORDER BY hour`).bind(...binds).all<{ hour: number; tokens: number }>(),
+		env.DB.prepare(`SELECT ${key} AS key, ${label} AS label, hour, SUM(tokens) AS tokens
+			FROM hourly_rows ${join} ${where} GROUP BY key, hour ORDER BY hour`)
+			.bind(...binds).all<{ key: string; label: string; hour: number; tokens: number }>(),
 		env.DB.prepare(`SELECT COALESCE(SUM(input + output + cache_read + cache_write + reasoning), 0) AS tokens FROM daily_rows ${where}`).bind(...binds).first<{ tokens: number }>(),
 	]);
-	const byHour = new Map(rows.results.map(row => [row.hour, row.tokens]));
-	const hourlyTokens = rows.results.reduce((sum, row) => sum + row.tokens, 0);
+	const hours = Array.from({ length: 24 }, (_, hour) => ({ hour, tokens: 0 }));
+	const entities = new Map<string, { key: string; label: string; tokens: number; hours: typeof hours }>();
+	for (const row of rows.results) {
+		let entity = entities.get(row.key);
+		if (!entity) {
+			entity = { key: row.key, label: row.label, tokens: 0,
+				hours: Array.from({ length: 24 }, (_, hour) => ({ hour, tokens: 0 })) };
+			entities.set(row.key, entity);
+		}
+		entity.hours[row.hour].tokens += row.tokens;
+		entity.tokens += row.tokens;
+		hours[row.hour].tokens += row.tokens;
+	}
+	const hourlyTokens = hours.reduce((sum, row) => sum + row.tokens, 0);
 	const totalTokens = dailyTotal?.tokens ?? 0;
 	return json({ date, totalTokens, hourlyTokens, hasHourlyData: rows.results.length > 0,
 		complete: hourlyTokens === totalTokens, timezone: "collector-local",
-		hours: Array.from({ length: 24 }, (_, hour) => ({ hour, tokens: byHour.get(hour) ?? 0 })) });
+		hours, group, entities: [...entities.values()].sort((a, b) => b.tokens - a.tokens || a.key.localeCompare(b.key)) });
 }
 
 async function models(url: URL, env: Env): Promise<Response> {

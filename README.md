@@ -9,7 +9,7 @@ This project uses Tokscale's `tokscale-core` to parse local session records and 
 ## Features
 
 - **Usage across hosts**: View usage from multiple computers and development servers in one place, with breakdowns by device, client, model, and date.
-- **Daily usage card**: See today's token total and an hourly chart; select a heatmap square to inspect another day. Built with React and Recharts, with matching light and dark themes.
+- **Daily usage card**: See today's token total and hourly curves grouped by device, tool, or model. The heatmap and chart share the same selection; click a square to inspect another day. A header control switches all token values between compact and full numbers. Built with React and Recharts, with matching light and dark themes.
 - **Install from the console**: Choose your OS and download the latest published release, or copy an installation command that saves the connection automatically.
 - **Automatic collection and synchronization**: Enter the Worker URL and token once. The collector verifies and saves the connection, then uses it on subsequent launches. By default, it scans and synchronizes every 60 seconds.
 - **Self-hosted deployment**: Run the API, database, and console in your own Cloudflare account, with a shared token authenticating device uploads.

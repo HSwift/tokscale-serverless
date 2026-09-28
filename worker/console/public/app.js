@@ -1,5 +1,5 @@
 import { initInstaller } from "./installer.js";
-import { renderDailyCard } from "./assets/daily-card.js";
+import { renderDailyCard, formatTokens, toolLabel, SERIES_COLORS } from "./assets/daily-card.js";
 
 const DAY_MS = 86_400_000;
 const RANGE_DAYS = { week: 7, month: 30, year: 371 };
@@ -13,7 +13,8 @@ const ISO_MIN_H = 1.5;
 const ISO_ACTIVE_MIN_H = 4;
 const ISO_MAX_H = 64;
 
-const BAR_COLORS = ["#2f8fff", "#57a5ff", "#79b8ff", "#a8d0ff", "#3d5a80", "#5c6779"];
+const BAR_COLORS = SERIES_COLORS;
+const GROUP_LABELS = { devices: "设备", clients: "工具", models: "模型" };
 const OTHER_COLOR = "#39435a";
 const BAR_TOP_N = 5;
 
@@ -22,6 +23,7 @@ const state = {
 	group: "devices",
 	selected: "all",
 	view: "2d",
+	numberFormat: savedNumberFormat(),
 	series: { devices: null, models: null, clients: null },
 	window: null,
 	selectedDate: toKey(new Date()),
@@ -41,18 +43,17 @@ function parseKey(key) {
 	return new Date(y, m - 1, d).getTime();
 }
 
-function fmtCompact(n) {
-	for (const [div, suffix] of [[1e9, "B"], [1e6, "M"], [1e3, "k"]]) {
-		if (n >= div) {
-			const v = (n / div).toFixed(1);
-			return `${v.endsWith(".0") ? v.slice(0, -2) : v}${suffix}`;
-		}
-	}
-	return String(Math.round(n));
+function savedNumberFormat() {
+	try { return localStorage.getItem("tokscale-number-format") === "exact" ? "exact" : "compact"; }
+	catch { return "compact"; }
 }
 
-function fmtExact(n) {
-	return Math.round(n).toLocaleString("en-US");
+function fmtTokens(n) {
+	return formatTokens(n, state.numberFormat);
+}
+
+function entityLabel(entity, group = state.group) {
+	return group === "clients" ? toolLabel(entity.key) : entity.label;
 }
 
 function intensity(tokens, max) {
@@ -199,7 +200,7 @@ function renderGrid(calendar) {
 			el.tabIndex = 0;
 			el.classList.toggle("selected-day", cell.date === state.selectedDate);
 			el.setAttribute("aria-pressed", String(cell.date === state.selectedDate));
-			el.setAttribute("aria-label", `${cell.date}: ${fmtExact(cell.tokens)} tokens`);
+			el.setAttribute("aria-label", `${cell.date}: ${fmtTokens(cell.tokens)} tokens`);
 		}
 		if (!reduceMotion) {
 			el.classList.add("animate");
@@ -254,7 +255,7 @@ function renderIso(calendar) {
 		g.classList.toggle("selected-day", cell.date === state.selectedDate);
 		g.setAttribute("role", "button");
 		g.setAttribute("tabindex", "0");
-		g.setAttribute("aria-label", `${cell.date}: ${fmtExact(cell.tokens)} tokens`);
+		g.setAttribute("aria-label", `${cell.date}: ${fmtTokens(cell.tokens)} tokens`);
 		g.setAttribute("aria-pressed", String(cell.date === state.selectedDate));
 		for (const [points, fill, face] of faces) {
 			const poly = document.createElementNS(ns, "polygon");
@@ -283,7 +284,7 @@ let tooltipAnchor = null;
 function showTooltip(anchor) {
 	const tip = tooltip();
 	const entity = selectedEntity();
-	const entityName = entity ? entity.label : null;
+	const entityName = entity ? entityLabel(entity) : null;
 	tip.replaceChildren();
 	if (entityName) {
 		const e = document.createElement("span");
@@ -297,7 +298,7 @@ function showTooltip(anchor) {
 	date.textContent = `${anchor.dataset.date} 周${"日一二三四五六"[d.getDay()]}`;
 	const tokens = document.createElement("span");
 	tokens.className = "t-tokens";
-	tokens.textContent = `${fmtExact(Number(anchor.dataset.tokens))} tokens`;
+	tokens.textContent = `${fmtTokens(Number(anchor.dataset.tokens))} tokens`;
 	tip.append(date, tokens);
 
 	const rect = anchor.getBoundingClientRect();
@@ -340,10 +341,10 @@ function renderStats() {
 	const active = [...daysMap.values()].filter((t) => t > 0).length;
 	const elapsed = Math.round((state.window.end - state.window.start) / DAY_MS) + 1;
 	const items = [
-		["今日", fmtCompact(daysMap.get(toKey(new Date())) ?? 0), fmtExact(daysMap.get(toKey(new Date())) ?? 0), true],
-		["总 tokens", fmtCompact(total), fmtExact(total), true],
+		["今日", fmtTokens(daysMap.get(toKey(new Date())) ?? 0), fmtTokens(daysMap.get(toKey(new Date())) ?? 0), true],
+		["总 tokens", fmtTokens(total), fmtTokens(total), true],
 		["活跃天数", String(active), `${active} / ${elapsed}`, false],
-		["日均", fmtCompact(total / Math.max(1, elapsed)), fmtExact(total / Math.max(1, elapsed)), false],
+		["日均", fmtTokens(total / Math.max(1, elapsed)), fmtTokens(total / Math.max(1, elapsed)), false],
 	];
 	const box = $("#stats");
 	box.replaceChildren();
@@ -376,7 +377,7 @@ function renderChips() {
 		l.textContent = label;
 		const n = document.createElement("span");
 		n.className = "n";
-		n.textContent = fmtCompact(tokens);
+		n.textContent = fmtTokens(tokens);
 		b.append(l, n);
 		box.append(b);
 	};
@@ -385,7 +386,7 @@ function renderChips() {
 		.sort((a, b) => b.windowTokens - a.windowTokens);
 	const total = totals.reduce((acc, e) => acc + e.windowTokens, 0);
 	make("all", "全部", total, false);
-	for (const e of totals) make(e.key, e.label, e.windowTokens, state.group === "models");
+	for (const e of totals) make(e.key, entityLabel(e), e.windowTokens, state.group === "models");
 }
 
 function renderHeatmap() {
@@ -401,7 +402,7 @@ function renderHeatmap() {
 	const fmt = (ts) => toKey(new Date(ts));
 	const active = calendar.cells.filter((c) => c.tokens > 0).length;
 	const entity = selectedEntity();
-	const scope = entity ? ` · ${entity.label}` : "";
+	const scope = entity ? ` · ${entityLabel(entity)}` : "";
 	$("#range-note").textContent = `${fmt(state.window.start)} – ${fmt(state.window.end)} · ${active} 天活跃${scope}`;
 
 	$("#months").classList.toggle("hidden", !hasData);
@@ -418,14 +419,14 @@ function renderBars() {
 		legend.replaceChildren();
 
 		const rows = (state.series[group]?.entities ?? [])
-			.map((e) => ({ label: e.label, tokens: entityWindowTokens(e) }))
+			.map((e) => ({ label: entityLabel(e, group), tokens: entityWindowTokens(e) }))
 			.filter((r) => r.tokens > 0)
 			.sort((a, b) => b.tokens - a.tokens);
 		const total = rows.reduce((acc, r) => acc + r.tokens, 0);
 
 		const totalEl = panel.querySelector(".bar-total");
-		totalEl.textContent = fmtCompact(total);
-		totalEl.title = fmtExact(total);
+		totalEl.textContent = fmtTokens(total);
+		totalEl.title = fmtTokens(total);
 
 		if (total === 0) {
 			const li = document.createElement("li");
@@ -460,8 +461,8 @@ function renderBars() {
 			name.title = seg.label;
 			const value = document.createElement("span");
 			value.className = "v";
-			value.textContent = fmtCompact(seg.tokens);
-			value.title = fmtExact(seg.tokens);
+			value.textContent = fmtTokens(seg.tokens);
+			value.title = fmtTokens(seg.tokens);
 			const share = document.createElement("span");
 			share.className = "p";
 			share.textContent = `${pct < 0.1 ? "<0.1" : pct.toFixed(1)}%`;
@@ -483,14 +484,13 @@ function renderAll() {
 	void renderDay();
 }
 
-let hourlyRequest = 0;
 function renderDay() {
-	const params = new URLSearchParams({ date: state.selectedDate });
+	const params = new URLSearchParams({ date: state.selectedDate, group: state.group });
 	if (state.selected !== "all") params.set({ devices: "deviceId", models: "modelId", clients: "client" }[state.group], state.selected);
 	const total = currentEntities().filter(entity => state.selected === "all" || entity.key === state.selected)
 		.reduce((sum, entity) => sum + (entity.days.find(day => day.date === state.selectedDate)?.tokens ?? 0), 0);
-	renderDailyCard({ date: state.selectedDate, today: toKey(new Date()), scope: selectedEntity()?.label ?? "全部设备",
-		query: params.toString(), initialTotal: total, refreshKey: ++hourlyRequest });
+	renderDailyCard({ date: state.selectedDate, today: toKey(new Date()), scope: selectedEntity() ? entityLabel(selectedEntity()) : `全部${GROUP_LABELS[state.group]}`,
+		query: params.toString(), initialTotal: total, group: state.group, numberFormat: state.numberFormat });
 }
 
 function selectDay(date) {
@@ -515,7 +515,25 @@ function activateSeg(seg, btn) {
 	}
 }
 
+function renderNumberFormat() {
+	for (const button of $("#number-format").querySelectorAll("button")) {
+		const active = button.dataset.format === state.numberFormat;
+		button.classList.toggle("active", active);
+		button.setAttribute("aria-pressed", String(active));
+	}
+}
+
 function bindControls() {
+	renderNumberFormat();
+	$("#number-format").addEventListener("click", event => {
+		const button = event.target.closest("button[data-format]");
+		if (!button || button.dataset.format === state.numberFormat) return;
+		state.numberFormat = button.dataset.format;
+		try { localStorage.setItem("tokscale-number-format", state.numberFormat); } catch {}
+		renderNumberFormat();
+		hideTooltip();
+		if (state.window) renderAll();
+	});
 	for (const container of [$("#grid"), $("#iso")]) {
 		container.addEventListener("click", event => {
 			const cell = event.target.closest?.("[data-date]");

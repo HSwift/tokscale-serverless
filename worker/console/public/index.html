@@ -25,6 +25,10 @@
 		<div class="topside">
 			<dl class="stats" id="stats" aria-live="polite"></dl>
 			<div class="header-actions">
+				<div class="seg small" id="number-format" role="group" aria-label="Token 数字格式">
+					<button type="button" data-format="compact" class="active" aria-pressed="true" title="以 K / M / B 显示 token 数字">简写</button>
+					<button type="button" data-format="exact" aria-pressed="false" title="显示完整 token 数字">完整</button>
+				</div>
 				<button id="install-open" class="icon-btn" type="button" aria-label="安装采集器" title="安装采集器" aria-haspopup="dialog">
 					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4" /></svg>
 				</button>
@@ -49,10 +53,11 @@
 				<button type="button" data-range="year" role="tab" aria-selected="false">年</button>
 			</div>
 			<div class="seg" id="group-seg" role="tablist" aria-label="统计维度">
-				<button type="button" data-group="devices" class="active" role="tab" aria-selected="true">设备</button>
-				<button type="button" data-group="models" role="tab" aria-selected="false">模型</button>
+				<button type="button" data-group="devices" class="active" role="tab" aria-selected="true">按设备</button>
+				<button type="button" data-group="clients" role="tab" aria-selected="false">按工具</button>
+				<button type="button" data-group="models" role="tab" aria-selected="false">按模型</button>
 			</div>
-			<div class="chips" id="chips" role="listbox" aria-label="选择设备或模型"></div>
+			<div class="chips" id="chips" role="listbox" aria-label="选择设备、工具或模型"></div>
 		</div>
 
 		<div class="heatmap" id="heatmap">
@@ -91,7 +96,7 @@
 
 	<section class="bars" aria-label="用量构成">
 		<div class="bar-panel" id="bar-clients">
-			<h2>按 agent <span class="bar-total"></span></h2>
+			<h2>按工具 <span class="bar-total"></span></h2>
 			<div class="share-bar" role="img"></div>
 			<ul class="bar-legend"></ul>
 		</div>
