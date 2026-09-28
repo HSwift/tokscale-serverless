@@ -169,6 +169,7 @@ pub async fn run(local_only: bool, do_sync: bool) -> bool {
                         start,
                         json!({
                             "messages":snapshot.messages.len(),"messagesByTool":tools,"creditRecords":snapshot.credits.len(),
+                            "missingModelMessages":snapshot.messages.iter().filter(|m| m.model_id.trim().is_empty()).count(),
                             "missingTimestamps":snapshot.messages.iter().filter(|m| m.timestamp <= 0).count(),
                             "estimatedMessages":snapshot.messages.iter().filter(|m| m.cost_source == tokscale_core::sessions::CostSource::Estimated).count(),
                             "pricingLoaded":snapshot.pricing_loaded,"scanMs":snapshot.scan_duration_ms,

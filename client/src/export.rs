@@ -14,7 +14,23 @@ use tokscale_core::{
 };
 
 /// Build the complete cloud upload without retaining raw records after the scan.
-pub fn build_payload(snapshot: Snapshot, device: &DeviceInfo) -> TsExport {
+pub fn build_payload(mut snapshot: Snapshot, device: &DeviceInfo) -> TsExport {
+    // Some source records carry usage with an empty model name. Preserve that
+    // usage under the same identity in daily, hourly and summary aggregation,
+    // including records restored from tokscale-core's parser cache.
+    let mut missing_models = 0;
+    for message in &mut snapshot.messages {
+        if message.model_id.trim().is_empty() {
+            message.model_id = "unknown".into();
+            missing_models += 1;
+        }
+    }
+    if missing_models > 0 {
+        tracing::warn!(
+            messages = missing_models,
+            "usage has empty model IDs; exporting as unknown"
+        );
+    }
     let hourly = aggregate_hourly(&snapshot.messages);
     let daily = aggregate_by_date(snapshot.messages);
     let summary = calculate_summary(&daily);

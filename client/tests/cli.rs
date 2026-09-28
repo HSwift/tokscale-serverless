@@ -438,6 +438,122 @@ fn assert_no_listening_sockets(pid: u32) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claude_empty_models_keep_usage_and_sync_consistently_after_restart() {
+    let received: Arc<Mutex<Vec<Value>>> = Arc::default();
+    let uploads = received.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/api/ingest", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new().route(
+                "/api/ingest",
+                post(move |Json(body): Json<Value>| {
+                    let uploads = uploads.clone();
+                    async move {
+                        if body["hourly"].as_array().unwrap().iter().any(|row| {
+                            row["modelId"]
+                                .as_str()
+                                .is_none_or(|id| id.trim().is_empty())
+                        }) {
+                            return Err(StatusCode::BAD_REQUEST);
+                        }
+                        uploads.lock().unwrap().push(body);
+                        Ok(Json(json!({"ok":true})))
+                    }
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+    });
+    let workspace = Workspace::new();
+    std::fs::create_dir_all(workspace.device_path().parent().unwrap()).unwrap();
+    std::fs::write(
+        workspace.device_path(),
+        json!({
+            "id":"dev_empty_models", "createdAt":"2026-01-01T00:00:00Z",
+            "syncUrl":url, "syncToken":"test-token", "refreshIntervalSecs":3600
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let project = workspace.0.join("data/.claude/projects/test");
+    std::fs::create_dir_all(&project).unwrap();
+    let rows = ["", " \t ", "unknown", "example-model"].into_iter().enumerate().map(|(i, model)| json!({
+        "type":"assistant", "timestamp":"2026-01-02T12:00:00Z",
+        "requestId":format!("request-{i}"),
+        "message":{"id":format!("message-{i}"),"model":model,"usage":{
+            "input_tokens":100,"output_tokens":10,"cache_read_input_tokens":20,"cache_creation_input_tokens":30
+        }}
+    }).to_string()).collect::<Vec<_>>().join("\n");
+    std::fs::write(project.join("session.jsonl"), rows).unwrap();
+    let run = |args: &[&str]| {
+        let output = workspace
+            .command()
+            .env("TOKSCALE_CLIENTS", "claude")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    };
+    let report: Value = serde_json::from_slice(&run(&["debug", "--local"]).stdout).unwrap();
+    let collection = report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["stage"] == "collection")
+        .unwrap();
+    assert_eq!(collection["details"]["missingModelMessages"], 2);
+    let anchor = workspace.device_path().with_file_name("sync-state.json");
+    assert!(!anchor.exists());
+    run(&["sync"]);
+    let saved = std::fs::read(&anchor).unwrap();
+    // A new process reuses the parser cache and acknowledged bucket identities.
+    run(&["sync"]);
+    assert_eq!(received.lock().unwrap().len(), 1);
+    assert_eq!(std::fs::read(&anchor).unwrap(), saved);
+    run(&["sync", "--full"]);
+    let uploads = received.lock().unwrap();
+    assert_eq!(uploads.len(), 2);
+    for body in uploads.iter() {
+        let day = &body["contributions"][0];
+        assert_eq!(day["totals"]["tokens"], 640);
+        assert_eq!(day["totals"]["messages"], 4);
+        assert_eq!(day["clients"].as_array().unwrap().len(), 2);
+        let unknown = day["clients"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["modelId"] == "unknown")
+            .unwrap();
+        assert_eq!(
+            unknown["tokens"],
+            json!({"input":300,"output":30,"cacheRead":60,"cacheWrite":90,"reasoning":0})
+        );
+        assert_eq!(body["hourly"].as_array().unwrap().len(), 2);
+        for row in body["hourly"].as_array().unwrap() {
+            assert_eq!(
+                row["tokens"],
+                if row["modelId"] == "unknown" {
+                    480
+                } else {
+                    160
+                }
+            );
+        }
+        assert_eq!(body["summary"]["total_tokens"], 640);
+        assert_eq!(body["summary"]["models"].as_array().unwrap().len(), 2);
+    }
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn diagnostics_trace_local_remote_and_sync_failures_without_leaking_tokens() {
     use axum::response::IntoResponse;
     use std::sync::atomic::{AtomicU8, Ordering};
@@ -589,10 +705,19 @@ async fn diagnostics_trace_local_remote_and_sync_failures_without_leaking_tokens
     assert!(!stderr.contains("test-token"));
     assert_eq!(std::fs::read(&anchor).unwrap(), saved);
     std::fs::write(source.join("test.jsonl"), usage("").to_string()).unwrap();
+    let unnamed = run(&["debug", "--local"], true);
+    assert_eq!(
+        check(&unnamed, "collection")["details"]["missingModelMessages"],
+        1
+    );
+    assert_eq!(check(&unnamed, "localPayload")["ok"], true);
+    let mut oversized = usage("example-model");
+    oversized["message"]["usage"]["input_tokens"] = json!(9_007_199_254_740_992_i64);
+    std::fs::write(source.join("test.jsonl"), oversized.to_string()).unwrap();
     let invalid = run(&["debug", "--local"], false);
     assert_eq!(
         check(&invalid, "localPayload")["details"]["validationErrors"][0]["path"],
-        "hourly[0].modelId"
+        "hourly[0].tokens"
     );
     server.abort();
     let _ = server.await;
