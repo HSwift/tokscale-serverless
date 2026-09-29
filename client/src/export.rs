@@ -101,7 +101,9 @@ pub fn build_payload(mut snapshot: Snapshot, device: &DeviceInfo) -> TsExport {
                 .bucket_timezone
                 .pinned_name()
                 .map(str::to_string)
-                .or_else(tokscale_core::bucket_tz::detect_local_iana_name)
+                // Metadata only: timestamps already carry the UTC timeline.
+                // The upstream detector verifies decades of local-time rules,
+                // which is expensive on Windows and unnecessary for this label.
                 .unwrap_or_else(|| Local::now().format("UTC%:z").to_string()),
         },
         device: device.clone(),
