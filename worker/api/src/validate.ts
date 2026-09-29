@@ -21,6 +21,10 @@ export function validateIngest(body: unknown): IngestIssue | null {
 		return issue("device.id", "must be a nonempty string");
 	}
 	if (!Array.isArray(body.contributions)) return issue("contributions", "must be an array");
+	if (body.meta !== undefined && !object(body.meta)) return issue("meta", "must be an object");
+	const meta = body.meta as Record<string, unknown> | undefined;
+	if (meta?.timelineVersion !== undefined && meta.timelineVersion !== 1) return issue("meta.timelineVersion", "unsupported timeline version");
+	if (meta?.sourceTimeZone !== undefined && (typeof meta.sourceTimeZone !== "string" || !meta.sourceTimeZone || meta.sourceTimeZone.length > 100)) return issue("meta.sourceTimeZone", "must be a timezone string");
 	for (const [i, day] of body.contributions.entries()) {
 		const path = `contributions[${i}]`;
 		if (!object(day)) return issue(path, "must be an object");
@@ -29,6 +33,20 @@ export function validateIngest(body: unknown): IngestIssue | null {
 		if (day.clients != null && !Array.isArray(day.clients)) return issue(`${path}.clients`, "must be an array");
 		for (const [j, row] of (day.clients ?? []).entries()) {
 			if (!object(row)) return issue(`${path}.clients[${j}]`, "must be an object");
+			const field = `${path}.clients[${j}].timeline`;
+			if (row.timeline !== undefined || meta?.timelineVersion === 1) {
+				if (!Array.isArray(row.timeline) || row.timeline.length > 4320) return issue(field, "must be an array of UTC minute/token pairs (at most 4320)");
+				if (typeof row.client !== "string" || !row.client || typeof row.modelId !== "string" || !row.modelId) return issue(field, "client and modelId are required");
+				const origin = Date.parse(`${day.date}T00:00:00Z`) / 60_000;
+				let previous = -1, total = 0;
+				for (const [k, pair] of row.timeline.entries()) {
+					if (!Array.isArray(pair) || pair.length !== 2 || !Number.isSafeInteger(pair[0]) || pair[0] <= previous || Math.abs(pair[0] - origin) > 2880 || !Number.isSafeInteger(pair[1]) || pair[1] < 0) return issue(`${field}[${k}]`, "must contain sorted unique UTC minutes near the source date and non-negative integer tokens");
+					previous = pair[0]; total += pair[1];
+				}
+				if (!object(row.tokens)) return issue(field, "token breakdown is required");
+				const count = ["input", "output", "cacheRead", "cacheWrite", "reasoning"].reduce((sum, name) => sum + Number((row.tokens as Record<string, unknown>)[name] ?? 0), 0);
+				if (!Number.isSafeInteger(total) || !Number.isSafeInteger(count) || total > count) return issue(field, "timeline tokens must not exceed the row total");
+			}
 		}
 	}
 	if (body.hourly !== undefined) {

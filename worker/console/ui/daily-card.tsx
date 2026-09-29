@@ -13,6 +13,8 @@ interface HourlyEntity {
 }
 
 interface HourlyData {
+    timezone?: string;
+    legacyTokens?: number;
 	date: string;
 	totalTokens: number;
 	hourlyTokens: number;
@@ -23,6 +25,7 @@ interface HourlyData {
 }
 
 interface Props {
+    timeZone?: string;
 	date: string;
 	today: string;
 	scope: string;
@@ -62,11 +65,12 @@ function DailyCard(props: Props) {
 	const chartData = hourlyChartData(series);
 	const maxTokens = Math.max(0, ...chartData.map(point => series.reduce((sum, entity) => sum + point[entity.dataKey], 0)));
 	const axisWidth = Math.max(48, Math.min(140, fmt(maxTokens * 1.2).length * 7 + 14));
-	const missing = data && !data.hasHourlyData && data.totalTokens > 0;
+	const legacyApi = data?.timezone === "collector-local";
+	const missing = data && (legacyApi || (!data.hasHourlyData && data.totalTokens > 0));
 	const note = current?.error ?? (missing
-		? "升级采集器并完成同步后，可从保留的本地会话补齐小时记录。"
+		? legacyApi ? "请更新 API 和采集器，补齐时区信息后显示小时记录。" : "升级采集器并完成同步后，可从保留的本地会话补齐时区和小时记录。"
 		: data && !data.complete ? `已记录 ${fmt(data.hourlyTokens)} tokens 的小时明细；部分用量尚未补齐。`
-			: "按采集主机本地时间汇总 · 点击方块查看其他日期");
+			: `时区：${data?.timezone ?? props.timeZone ?? "浏览器本地时间"} · 点击方块查看其他日期`);
 	return <div aria-busy={loading}>
 		<div className="daily-head">
 			<div>

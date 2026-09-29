@@ -8,6 +8,7 @@ use crate::scan::Snapshot;
 use chrono::{Local, Timelike};
 use serde::Serialize;
 use std::collections::BTreeMap;
+use tokscale_core::bucket_tz::BucketTimezone;
 use tokscale_core::sessions::UnifiedMessage;
 use tokscale_core::{
     aggregate_by_date, calculate_summary, DailyContribution, DataSummary, TokenBreakdown,
@@ -31,14 +32,33 @@ pub fn build_payload(mut snapshot: Snapshot, device: &DeviceInfo) -> TsExport {
             "usage has empty model IDs; exporting as unknown"
         );
     }
-    let hourly = aggregate_hourly(&snapshot.messages);
+    let hourly = aggregate_hourly_in(&snapshot.messages, &snapshot.bucket_timezone);
+    // Sparse UTC minute totals live in the existing daily row, not one D1 row
+    // per minute. They can be rebucketed exactly for fractional-offset zones.
+    let mut timelines = BTreeMap::<(String, String, String), BTreeMap<i64, i64>>::new();
+    for message in &snapshot.messages {
+        if message.timestamp <= 0 {
+            continue;
+        }
+        let key = (
+            message.date.clone(),
+            message.client.clone(),
+            tokscale_core::canonical_model_id(&message.model_id),
+        );
+        let tokens = timelines
+            .entry(key)
+            .or_default()
+            .entry(message.timestamp / 60_000)
+            .or_default();
+        *tokens = tokens.saturating_add(message.tokens.total());
+    }
     let daily = aggregate_by_date(snapshot.messages);
     let summary = calculate_summary(&daily);
     let mut credits = BTreeMap::<String, f64>::new();
     for row in snapshot.credits {
         *credits.entry(row.date).or_default() += row.credits;
     }
-    let contributions: Vec<_> = daily
+    let mut contributions: Vec<_> = daily
         .iter()
         .map(|day| {
             to_ts_daily(
@@ -48,6 +68,17 @@ pub fn build_payload(mut snapshot: Snapshot, device: &DeviceInfo) -> TsExport {
             )
         })
         .collect();
+    for day in &mut contributions {
+        for row in &mut day.clients {
+            row.timeline = Some(
+                timelines
+                    .remove(&(day.date.clone(), row.client.clone(), row.model_id.clone()))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect(),
+            );
+        }
+    }
     let start = contributions
         .iter()
         .map(|day| day.date.as_str())
@@ -65,6 +96,13 @@ pub fn build_payload(mut snapshot: Snapshot, device: &DeviceInfo) -> TsExport {
             generated_at: chrono::Utc::now().to_rfc3339(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             date_range: TsDateRange { start, end },
+            timeline_version: 1,
+            source_time_zone: snapshot
+                .bucket_timezone
+                .pinned_name()
+                .map(str::to_string)
+                .or_else(tokscale_core::bucket_tz::detect_local_iana_name)
+                .unwrap_or_else(|| Local::now().format("UTC%:z").to_string()),
         },
         device: device.clone(),
         summary,
@@ -98,6 +136,9 @@ impl From<&TokenBreakdown> for TsTokenBreakdown {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TsSourceContribution {
+    /// Sorted [Unix minute, total tokens] pairs, including only observed times.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeline: Option<Vec<(i64, i64)>>,
     pub client: String,
     pub model_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -145,6 +186,8 @@ pub struct TsDateRange {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TsExportMeta {
+    pub timeline_version: u32,
+    pub source_time_zone: String,
     pub generated_at: String,
     pub version: String,
     pub date_range: TsDateRange,
@@ -193,6 +236,37 @@ pub fn validation_issues(payload: &TsExport) -> Vec<serde_json::Value> {
         if !valid_date(&day.date) {
             issues.push(serde_json::json!({"path":format!("contributions[{i}].date"),"reason":"invalid calendar date","date":day.date}));
         }
+        for (j, row) in day.clients.iter().enumerate() {
+            let Some(points) = &row.timeline else {
+                continue;
+            };
+            let origin = chrono::NaiveDate::parse_from_str(&day.date, "%Y-%m-%d")
+                .ok()
+                .and_then(|date| date.and_hms_opt(0, 0, 0))
+                .map(|date| date.and_utc().timestamp() / 60);
+            let mut previous = -1;
+            let mut total = 0i64;
+            let valid = points.len() <= 4320
+                && points.iter().all(|&(minute, tokens)| {
+                    let valid = minute > previous
+                        && origin.is_some_and(|origin| minute.abs_diff(origin) <= 2880)
+                        && (0..=9_007_199_254_740_991).contains(&tokens);
+                    previous = minute;
+                    total = total.saturating_add(tokens);
+                    valid
+                });
+            let count = row.tokens.input
+                + row.tokens.output
+                + row.tokens.cache_read
+                + row.tokens.cache_write
+                + row.tokens.reasoning;
+            if !valid || total > count || total > 9_007_199_254_740_991 {
+                issues.push(serde_json::json!({"path":format!("contributions[{i}].clients[{j}].timeline"),"reason":"invalid UTC minute totals"}));
+                if issues.len() >= 20 {
+                    break;
+                }
+            }
+        }
     }
     for (i, row) in payload.hourly.iter().enumerate() {
         if issues.len() >= 20 {
@@ -220,7 +294,15 @@ pub fn validation_issues(payload: &TsExport) -> Vec<serde_json::Value> {
 
 /// Use the same local calendar as tokscale-core's daily aggregation. Missing
 /// timestamps stay out of hourly data rather than inventing a midnight spike.
+#[cfg(test)]
 pub fn aggregate_hourly(messages: &[UnifiedMessage]) -> Vec<TsHourlyContribution> {
+    aggregate_hourly_in(messages, &BucketTimezone::Local)
+}
+
+fn aggregate_hourly_in(
+    messages: &[UnifiedMessage],
+    timezone: &BucketTimezone,
+) -> Vec<TsHourlyContribution> {
     let mut buckets = BTreeMap::<(String, u32, String, String), i64>::new();
     for message in messages {
         if message.timestamp <= 0 {
@@ -229,13 +311,22 @@ pub fn aggregate_hourly(messages: &[UnifiedMessage]) -> Vec<TsHourlyContribution
         let Some(time) = chrono::DateTime::from_timestamp_millis(message.timestamp) else {
             continue;
         };
-        let local = time.with_timezone(&Local);
-        if local.format("%Y-%m-%d").to_string() != message.date {
+        let (date, hour) = match timezone {
+            BucketTimezone::Local => {
+                let local = time.with_timezone(&Local);
+                (local.format("%Y-%m-%d").to_string(), local.hour())
+            }
+            BucketTimezone::Pinned(zone) => {
+                let local = time.with_timezone(zone);
+                (local.format("%Y-%m-%d").to_string(), local.hour())
+            }
+        };
+        if date != message.date {
             continue;
         }
         let key = (
             message.date.clone(),
-            local.hour(),
+            hour,
             message.client.clone(),
             message.model_id.clone(),
         );
@@ -276,6 +367,7 @@ pub fn to_ts_daily(
             .clients
             .iter()
             .map(|c| TsSourceContribution {
+                timeline: None,
                 client: c.client.clone(),
                 model_id: c.model_id.clone(),
                 provider_id: (!c.provider_id.is_empty()).then(|| c.provider_id.clone()),

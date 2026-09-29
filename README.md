@@ -177,6 +177,36 @@ Connection fields are `syncUrl`, `syncToken`, and `refreshIntervalSecs`. Existin
 
 On all three platforms, use `TOKSCALE_CONFIG_DIR` to select a configuration directory and `TOKSCALE_HOME` to select the home directory to scan. Paths support Unicode characters and spaces; absolute paths are recommended. Restart the collector after changing its configuration. Run `--help` to see the actual configuration path.
 
+Keep scanner options in **`settings.json`** beside `device.json`, using the upstream format. The collector reads `defaultClients` and `scanner`; upstream UI preferences do not affect collection:
+
+```json
+{
+  "scanner": {
+    "extraScanPaths": {
+      "codex": ["/data/account-a/.codex/sessions", "/data/account-b/.codex/sessions"],
+      "claude": ["/data/claude/projects"],
+      "gemini": ["/data/gemini/tmp"],
+      "qoder": ["/data/qoder/projects", "/data/qoder/local.db"]
+    },
+    "opencodeDbPaths": ["/data/opencode/opencode.db"]
+  }
+}
+```
+
+Include only paths present on your machine and use absolute paths (`C:/Users/example/...` works on Windows). JSON paths do not expand `~` or environment variables. `extraScanPaths` supports upstream clients with extra-root scanning; this project adds `qoder`, accepting both projects directories and SQLite files. Upstream `kilo`, `crush`, and `goose` use specialized discovery and do not support this generic list. Use `opencodeDbPaths` for additional OpenCode SQLite databases.
+
+Extra paths are merged with default scan locations; omitting them preserves existing behavior. Optionally set top-level `"defaultClients": ["codex", "claude", "qoder"]` to restrict tools; an absent or empty list includes all tools, and `TOKSCALE_CLIENTS` takes precedence. `scanner.bucketTimezone` controls collector-side daily records and credits, defaulting to the machine's timezone; keep it stable after syncing. Console token dates and hours follow the browser timezone, so machines do not need matching system timezones.
+
+After editing, run `tokscale-client debug --local` to check settings and paths, then `tokscale-client service restart`; reinstalling is unnecessary. The collector reads without rewriting upstream settings. A missing file uses defaults; malformed settings produce an explicit error.
+
+### v0.4 timezone fix and upgrade
+
+Deploy the API first (`npm --prefix worker run deploy:api` applies `0005_utc_timeline.sql`), then update the console and collectors. Collectors upload UTC minute timestamps and their source timezone. The heatmap, category cards, and hourly bars use the browser's IANA timezone, including midnight crossings, fractional offsets, and daylight saving time. Repeated clock hours during fall-back are combined into one bar.
+
+Compact UTC timelines share existing daily rows; there is no D1 row per minute, and modern uploads no longer write the legacy hourly table. The first sync backfills locally retained history by replacing matching records without adding them twice. Until timestamps are available, legacy or untimed totals stay on their original date with an explicit notice and are excluded from the hourly chart. Legacy API requests without `timeZone` retain collector-local date semantics.
+
+Run `tokscale-client sync` after updating to backfill immediately, or `sync --full` to resend history manually. Collectors report an error and keep their sync anchor if the API has not been upgraded. Do not clear D1; timestamps cannot be recovered for historical logs already removed from the source machine.
+
 ### Incremental and full synchronization
 
 The collector keeps `sync-state.json` beside `device.json`. After the first full upload, it sends only changed daily/model rows, credits and hourly buckets. Fingerprints advance only after the API acknowledges success, survive restarts, and detect corrections to older dates (including changed Qoder calibration). Unchanged scans make no upload; idle scans send a device-only heartbeat at most once per hour. Collection still runs at the configured interval.

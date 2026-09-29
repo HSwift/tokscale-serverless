@@ -3,12 +3,13 @@ use crate::qoder::{self, QoderCredit};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
+use tokscale_core::bucket_tz::BucketTimezone;
 use tokscale_core::pricing::PricingService;
-use tokscale_core::scanner::ScannerSettings;
 use tokscale_core::sessions::UnifiedMessage;
 use tokscale_core::{parse_local_unified_messages_with_pricing, LocalParseOptions};
 
 pub struct Snapshot {
+    pub bucket_timezone: BucketTimezone,
     pub messages: Vec<UnifiedMessage>,
     /// Qoder plan credits, reported separately from USD costs.
     pub credits: Vec<QoderCredit>,
@@ -44,7 +45,7 @@ pub async fn collect(cfg: &Config) -> Result<Snapshot, String> {
                 since: None,
                 until: None,
                 year: None,
-                scanner_settings: ScannerSettings::default(),
+                scanner_settings: cfg.scanner_settings.clone(),
             };
             let mut messages =
                 parse_local_unified_messages_with_pricing(options, pricing.as_deref()).await?;
@@ -55,12 +56,32 @@ pub async fn collect(cfg: &Config) -> Result<Snapshot, String> {
                 .as_ref()
                 .is_none_or(|list| list.iter().any(|c| c == qoder::QODER_CLIENT));
             let mut credits = Vec::new();
+            let bucket_timezone = BucketTimezone::from_scanner_settings(&cfg.scanner_settings);
             if lane_enabled {
-                let scan = qoder::scan(
+                let mut scan = qoder::scan(
                     &lane_home(&cfg),
                     cfg.use_env_roots,
+                    crate::settings::qoder_paths(&cfg.scanner_settings),
                     &crate::coeffs::CoeffTable::load(),
                 );
+                if bucket_timezone.is_pinned() {
+                    for message in &mut scan.messages {
+                        if message.timestamp > 0 {
+                            let date = bucket_timezone.day_key(message.timestamp);
+                            if !date.is_empty() {
+                                message.date = date;
+                            }
+                        }
+                    }
+                    for credit in &mut scan.credits {
+                        if credit.timestamp > 0 {
+                            let date = bucket_timezone.day_key(credit.timestamp);
+                            if !date.is_empty() {
+                                credit.date = date;
+                            }
+                        }
+                    }
+                }
                 tracing::info!(
                     messages = scan.messages.len(),
                     credits_rows = scan.credits.len(),
@@ -70,6 +91,7 @@ pub async fn collect(cfg: &Config) -> Result<Snapshot, String> {
                 credits = scan.credits;
             }
             Ok(Snapshot {
+                bucket_timezone,
                 messages,
                 credits,
                 pricing_loaded,

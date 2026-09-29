@@ -19,6 +19,8 @@ pub const QODER_CLIENT: &str = "qoder";
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QoderCredit {
+    #[serde(skip)]
+    pub timestamp: i64,
     pub date: String,
     pub credits: f64,
     pub model_id: String,
@@ -33,7 +35,12 @@ pub struct QoderScan {
     credit_indexes: HashMap<String, usize>,
 }
 
-pub fn scan(home: &Path, use_env_roots: bool, coeffs: &CoeffTable) -> QoderScan {
+pub fn scan(
+    home: &Path,
+    use_env_roots: bool,
+    extra_paths: &[PathBuf],
+    coeffs: &CoeffTable,
+) -> QoderScan {
     let mut out = QoderScan::default();
     let mut seen: HashSet<String> = HashSet::new();
     let env = |name: &str| {
@@ -45,12 +52,25 @@ pub fn scan(home: &Path, use_env_roots: bool, coeffs: &CoeffTable) -> QoderScan 
             None
         }
     };
-    for db in db_candidates(home, env) {
+    let mut seen_paths = HashSet::new();
+    for db in db_candidates(home, env)
+        .into_iter()
+        .chain(extra_paths.iter().filter(|p| p.is_file()).cloned())
+    {
+        if !seen_paths.insert(std::fs::canonicalize(&db).unwrap_or_else(|_| db.clone())) {
+            continue;
+        }
         if db.is_file() {
             parse_db(&db, &mut seen, &mut out);
         }
     }
-    for dir in projects_candidates(home, env) {
+    for dir in projects_candidates(home, env)
+        .into_iter()
+        .chain(extra_paths.iter().filter(|p| p.is_dir()).cloned())
+    {
+        if !seen_paths.insert(std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone())) {
+            continue;
+        }
         if dir.is_dir() {
             parse_projects(&dir, &mut seen, &mut out, coeffs);
         }
@@ -531,6 +551,7 @@ fn parse_transcript(
 fn emit_transcript(row: TranscriptRow, seen: &mut HashSet<String>, out: &mut QoderScan) {
     if let Some(credits) = row.usage.credits.filter(|c| *c > 0.0) {
         let credit = QoderCredit {
+            timestamp: row.message.timestamp,
             date: row.message.date.clone(),
             credits,
             model_id: row.message.model_id.clone(),

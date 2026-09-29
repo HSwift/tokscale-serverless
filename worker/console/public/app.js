@@ -4,6 +4,7 @@ import { filterBreakdown } from "./breakdown.js";
 
 const DAY_MS = 86_400_000;
 const RANGE_DAYS = { week: 7, month: 30, year: 371 };
+const TIME_ZONE = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
 
 const LEVELS = ["var(--l0)", "var(--l1)", "var(--l2)", "var(--l3)", "var(--l4)"];
 
@@ -40,9 +41,11 @@ function toKey(d) {
 	return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
+const calendarKey = (timestamp) => new Date(timestamp).toISOString().slice(0, 10);
+
 function parseKey(key) {
 	const [y, m, d] = key.split("-").map(Number);
-	return new Date(y, m - 1, d).getTime();
+	return Date.UTC(y, m - 1, d);
 }
 
 function savedNumberFormat() {
@@ -142,12 +145,12 @@ function globalDaysMap() {
 
 function buildCalendar(daysMap) {
 	const { start: winStart, end: today } = state.window;
-	const start = winStart - new Date(winStart).getDay() * DAY_MS;
-	const end = today + (6 - new Date(today).getDay()) * DAY_MS;
+	const start = winStart - new Date(winStart).getUTCDay() * DAY_MS;
+	const end = today + (6 - new Date(today).getUTCDay()) * DAY_MS;
 
 	const cells = [];
 	for (let t = start; t <= end; t += DAY_MS) {
-		const key = toKey(new Date(t));
+		const key = calendarKey(t);
 		cells.push({
 			date: key,
 			tokens: t > today ? 0 : (daysMap.get(key) ?? 0),
@@ -163,7 +166,7 @@ function buildCalendar(daysMap) {
 	const months = [];
 	let lastMonth = -1;
 	for (let w = 0; w < weekCount; w++) {
-		const month = new Date(start + w * 7 * DAY_MS).getMonth();
+		const month = new Date(start + w * 7 * DAY_MS).getUTCMonth();
 		if (month !== lastMonth) {
 			months.push({ week: w, label: `${month + 1}月` });
 			lastMonth = month;
@@ -299,7 +302,7 @@ function showTooltip(anchor) {
 	const date = document.createElement("span");
 	date.className = "t-date";
 	const d = new Date(parseKey(anchor.dataset.date));
-	date.textContent = `${anchor.dataset.date} 周${"日一二三四五六"[d.getDay()]}`;
+	date.textContent = `${anchor.dataset.date} 周${"日一二三四五六"[d.getUTCDay()]}`;
 	const tokens = document.createElement("span");
 	tokens.className = "t-tokens";
 	tokens.textContent = `${fmtTokens(Number(anchor.dataset.tokens))} tokens`;
@@ -403,7 +406,7 @@ function renderHeatmap() {
 	renderGrid(calendar);
 	renderIso(calendar);
 
-	const fmt = (ts) => toKey(new Date(ts));
+	const fmt = (ts) => calendarKey(ts);
 	const active = calendar.cells.filter((c) => c.tokens > 0).length;
 	const entity = selectedEntity();
 	const scope = entity ? ` · ${entityLabel(entity)}` : "";
@@ -418,7 +421,7 @@ function renderHeatmap() {
 function renderBars() {
 	const totals = state.breakdown ? filterBreakdown(state.breakdown, {
 		group: state.group, selected: state.selected, date: state.selectedDate,
-		since: toKey(new Date(state.window.start)), until: toKey(new Date(state.window.end)),
+		since: calendarKey(state.window.start), until: calendarKey(state.window.end),
 	}) : null;
 	const win = state.selectedDate ? { start: parseKey(state.selectedDate), end: parseKey(state.selectedDate) } : state.window;
 	for (const [id, group] of [["bar-clients", "clients"], ["bar-models", "models"], ["bar-devices", "devices"]]) {
@@ -499,12 +502,12 @@ function renderAll() {
 
 function renderDay() {
 	const date = state.selectedDate ?? toKey(new Date());
-	const params = new URLSearchParams({ date, group: state.group });
+	const params = new URLSearchParams({ date, group: state.group, timeZone: TIME_ZONE });
 	if (state.selected !== "all") params.set({ devices: "deviceId", models: "modelId", clients: "client" }[state.group], state.selected);
 	const total = currentEntities().filter(entity => state.selected === "all" || entity.key === state.selected)
 		.reduce((sum, entity) => sum + (entity.days.find(day => day.date === date)?.tokens ?? 0), 0);
 	renderDailyCard({ date, today: toKey(new Date()), scope: selectedEntity() ? entityLabel(selectedEntity()) : `全部${GROUP_LABELS[state.group]}`,
-		query: params.toString(), initialTotal: total, group: state.group, numberFormat: state.numberFormat });
+		query: params.toString(), initialTotal: total, group: state.group, numberFormat: state.numberFormat, timeZone: TIME_ZONE });
 }
 
 function selectDay(date) {
@@ -633,7 +636,7 @@ async function boot() {
 	try {
 		// One request covers all views and only the dates this UI can display.
 		const visible = windowFor("year");
-		const query = new URLSearchParams({ since: toKey(new Date(visible.start)), until: toKey(new Date(visible.end)) });
+		const query = new URLSearchParams({ since: calendarKey(visible.start), until: calendarKey(visible.end), timeZone: TIME_ZONE });
 		let data;
 		try {
 			data = await fetchJSON(`/api/dashboard?${query}`);
@@ -656,7 +659,7 @@ async function boot() {
 
 		const foot = $("#page-foot");
 		const span = document.createElement("span");
-		span.textContent = "tokscale-serverless";
+		span.textContent = `时区：${TIME_ZONE}${data.legacyTokens ? ` · ${fmtTokens(data.legacyTokens)} tokens 尚未补齐时区` : ""}`;
 		const right = document.createElement("span");
 		right.textContent = `更新于 ${new Date().toLocaleString("zh-CN", { hour12: false })}`;
 		foot.append(span, right);

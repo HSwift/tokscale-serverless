@@ -1,6 +1,6 @@
 [package]
 name = "tokscale-client"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 license = "MIT"
 description = "Tokscale collector: scans local token usage and synchronizes it with the cloud worker"

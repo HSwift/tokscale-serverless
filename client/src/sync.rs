@@ -192,6 +192,14 @@ impl Session {
                 response.describe()
             ));
         }
+        if response
+            .body
+            .get("timelineVersion")
+            .and_then(|v| v.as_u64())
+            != Some(1)
+        {
+            return Err("Worker does not acknowledge UTC timelines; update the API before syncing this collector; sync anchor unchanged".into());
+        }
         save_checkpoint(&self.state_path, &checkpoint)?;
         tracing::info!(
             full,
@@ -361,8 +369,10 @@ mod tests {
             .collect();
         crate::export::build_payload(
             Snapshot {
+                bucket_timezone: Default::default(),
                 messages,
                 credits: vec![crate::qoder::QoderCredit {
+                    timestamp: 0,
                     date: "2026-09-01".into(),
                     credits: 1.0,
                     model_id: "a".into(),
@@ -504,13 +514,17 @@ mod tests {
                         let mode = server_mode.clone();
                         async move {
                             match mode.load(Ordering::SeqCst) {
+                                3 => (
+                                    axum::http::StatusCode::OK,
+                                    Json(serde_json::json!({"ok":true})),
+                                ),
                                 0 => (
                                     axum::http::StatusCode::SERVICE_UNAVAILABLE,
                                     Json(serde_json::json!({"ok":false})),
                                 ),
                                 value => (
                                     axum::http::StatusCode::OK,
-                                    Json(serde_json::json!({"ok":value == 2})),
+                                    Json(serde_json::json!({"ok":value == 2,"timelineVersion":1})),
                                 ),
                             }
                         }
@@ -523,6 +537,7 @@ mod tests {
         let dir = TestDirectory::new();
         let session = Session::acquire_in(&dir.0, true).await.unwrap().unwrap();
         let cfg = Config {
+            scanner_settings: Default::default(),
             tokscale_home: None,
             clients: None,
             pricing: crate::config::PricingMode::Off,
@@ -531,7 +546,7 @@ mod tests {
             sync_url: Some(url),
             sync_token: Some("test-token".into()),
         };
-        for value in [0, 1] {
+        for value in [0, 1, 3] {
             mode.store(value, Ordering::SeqCst);
             assert!(session.push_payload(&cfg, payload(), false).await.is_err());
             assert!(!session.state_path.exists());

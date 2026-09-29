@@ -21,6 +21,59 @@ fn path_check(path: &Path) -> Value {
     }
 }
 
+fn configured_source_checks(cfg: &config::Config) -> Vec<Value> {
+    use tokscale_core::{clients::ClientId, scanner::extra_scan_paths_for};
+    let enabled = |client: &str| {
+        cfg.clients
+            .as_ref()
+            .is_none_or(|clients| clients.iter().any(|name| name == client))
+    };
+    let clients = cfg
+        .scanner_settings
+        .extra_scan_paths
+        .keys()
+        .filter_map(|name| ClientId::from_str(name))
+        .filter(|client| enabled(client.as_str()))
+        .collect();
+    let mut paths: Vec<_> = extra_scan_paths_for(&cfg.scanner_settings, &clients)
+        .into_iter()
+        .map(|(client, path)| {
+            (
+                client.as_str(),
+                path,
+                matches!(client, ClientId::Codex | ClientId::Claude),
+            )
+        })
+        .collect();
+    if enabled("opencode") {
+        paths.extend(
+            cfg.scanner_settings
+                .opencode_db_paths
+                .iter()
+                .cloned()
+                .map(|path| ("opencode", path, false)),
+        );
+    }
+    if enabled("qoder") {
+        paths.extend(
+            crate::settings::qoder_paths(&cfg.scanner_settings)
+                .iter()
+                .cloned()
+                .map(|path| ("qoder", path, false)),
+        );
+    }
+    paths
+        .into_iter()
+        .map(|(client, path, directory_only)| {
+            let mut result = path_check(&path);
+            result["client"] = client.into();
+            result["configured"] = true.into();
+            result["directoryOnly"] = directory_only.into();
+            result
+        })
+        .collect()
+}
+
 fn check(report: &mut Value, stage: &str, ok: bool, started: Instant, details: Value) {
     report["checks"].as_array_mut().unwrap().push(json!({
         "stage":stage,"ok":ok,"elapsedMs":started.elapsed().as_millis(),"details":details
@@ -98,6 +151,7 @@ pub async fn run(local_only: bool, do_sync: bool) -> bool {
         candidates.dedup();
         roots.extend(candidates.iter().map(|path| path_check(path)));
     }
+    roots.extend(configured_source_checks(&cfg));
     check(
         &mut report,
         "configuration",
@@ -105,6 +159,7 @@ pub async fn run(local_only: bool, do_sync: bool) -> bool {
         start,
         json!({
             "configFile":config::connection_path(),"scanHome":home,"clients":cfg.clients,
+            "settingsFile":crate::settings::path(),"scanner":cfg.scanner_settings,
             "useEnvRoots":cfg.use_env_roots,"pricing":format!("{:?}",cfg.pricing),
             "intervalSecs":cfg.refresh_interval_secs,"syncUrl":cfg.sync_url,
             "tokenConfigured":cfg.sync_token.is_some(),
@@ -113,10 +168,14 @@ pub async fn run(local_only: bool, do_sync: bool) -> bool {
         }),
     );
     let source_ok = roots[0]["readable"] == true
-        && roots
-            .iter()
-            .skip(1)
-            .all(|path| path["readable"] == true || path["missing"] == true);
+        && roots.iter().skip(1).all(|path| {
+            if path["configured"] == true {
+                path["readable"] == true
+                    && (path["directoryOnly"] != true || path["kind"] == "directory")
+            } else {
+                path["readable"] == true || path["missing"] == true
+            }
+        });
     check(
         &mut report,
         "sourceAccess",
@@ -186,6 +245,8 @@ pub async fn run(local_only: bool, do_sync: bool) -> bool {
                         start,
                         json!({
                             "days":payload.contributions.len(),"dailyRows":payload.contributions.iter().map(|d| d.clients.len()).sum::<usize>(),
+                            "timelineVersion":payload.meta.timeline_version,"sourceTimeZone":payload.meta.source_time_zone,
+                            "utcMinutes":payload.contributions.iter().flat_map(|day| &day.clients).map(|row| row.timeline.as_ref().map_or(0, Vec::len)).sum::<usize>(),
                             "hourlyRows":payload.hourly.len(),"models":payload.summary.models.len(),
                             "dateRange":payload.meta.date_range,"bytes":serde_json::to_vec(&payload).map(|b| b.len()).ok(),
                             "validationErrors":issues

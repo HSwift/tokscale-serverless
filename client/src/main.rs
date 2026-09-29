@@ -8,6 +8,7 @@ mod http;
 mod qoder;
 mod scan;
 mod service;
+mod settings;
 mod sync;
 
 use std::io::IsTerminal;

@@ -127,6 +127,7 @@ pub enum PricingMode {
 
 #[derive(Clone)]
 pub struct Config {
+    pub scanner_settings: tokscale_core::scanner::ScannerSettings,
     pub tokscale_home: Option<String>,
     pub clients: Option<Vec<String>>,
     pub pricing: PricingMode,
@@ -141,7 +142,13 @@ pub struct Config {
 impl Config {
     pub fn from_env() -> Result<Self, String> {
         let saved = load_connection(&connection_path())?;
-        Self::resolve(saved.as_ref(), |name| std::env::var(name).ok())
+        let settings = crate::settings::Settings::load(&crate::settings::path())?;
+        let mut cfg = Self::resolve(saved.as_ref(), |name| std::env::var(name).ok())?;
+        if std::env::var_os("TOKSCALE_CLIENTS").is_none() && !settings.default_clients.is_empty() {
+            cfg.clients = Some(settings.default_clients);
+        }
+        cfg.scanner_settings = settings.scanner;
+        Ok(cfg)
     }
 
     fn resolve(
@@ -199,6 +206,7 @@ impl Config {
                 ),
             };
         Ok(Self {
+            scanner_settings: Default::default(),
             tokscale_home: env_opt("TOKSCALE_HOME"),
             clients,
             pricing,

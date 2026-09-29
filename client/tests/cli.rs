@@ -169,7 +169,7 @@ async fn connection_rotation_restart_and_periodic_collection_across_platforms() 
                     if attempt == 1 {
                         Err(StatusCode::SERVICE_UNAVAILABLE)
                     } else {
-                        Ok(Json(json!({"ok": true})))
+                        Ok(Json(json!({"ok": true,"timelineVersion":1})))
                     }
                 }
             }),
@@ -345,7 +345,7 @@ async fn one_shot_sync_reuses_anchor_and_full_resends_history() {
                     let uploads = uploads.clone();
                     async move {
                         uploads.lock().unwrap().push(body);
-                        Json(json!({"ok":true}))
+                        Json(json!({"ok":true,"timelineVersion":1}))
                     }
                 }),
             ),
@@ -459,7 +459,7 @@ async fn claude_empty_models_keep_usage_and_sync_consistently_after_restart() {
                             return Err(StatusCode::BAD_REQUEST);
                         }
                         uploads.lock().unwrap().push(body);
-                        Ok(Json(json!({"ok":true})))
+                        Ok(Json(json!({"ok":true,"timelineVersion":1})))
                     }
                 }),
             ),
@@ -566,7 +566,10 @@ async fn diagnostics_trace_local_remote_and_sync_failures_without_leaking_tokens
         let path = request.uri().path().to_string();
         requests.lock().unwrap().push(path.clone());
         async move {
-            assert_eq!(request.headers()["user-agent"], "tokscale-client/0.3.0");
+            assert_eq!(
+                request.headers()["user-agent"],
+                concat!("tokscale-client/", env!("CARGO_PKG_VERSION"))
+            );
             assert_eq!(request.headers()["authorization"], "Bearer test-token");
             if mode == 1 && path == "/api/me" {
                 return (
@@ -605,7 +608,9 @@ async fn diagnostics_trace_local_remote_and_sync_failures_without_leaking_tokens
                     json!({"ok":true,"apiVersion":"0.3.0","database":{"ok":true}})
                 }
                 "/api/ingest/validate" => json!({"ok":true,"validationOnly":true}),
-                "/api/ingest" => json!({"ok":true,"rowsRead":2,"rowsWritten":1}),
+                "/api/ingest" => {
+                    json!({"ok":true,"timelineVersion":1,"rowsRead":2,"rowsWritten":1})
+                }
                 _ => panic!("unexpected diagnostic route"),
             })
             .into_response()
@@ -666,7 +671,7 @@ async fn diagnostics_trace_local_remote_and_sync_failures_without_leaking_tokens
             .clone()
     };
     let local = run(&["debug", "--local"], true);
-    assert_eq!(local["version"], "0.3.0");
+    assert_eq!(local["version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(
         check(&local, "collection")["details"]["messagesByTool"]["qoder"],
         1
@@ -715,10 +720,14 @@ async fn diagnostics_trace_local_remote_and_sync_failures_without_leaking_tokens
     oversized["message"]["usage"]["input_tokens"] = json!(9_007_199_254_740_992_i64);
     std::fs::write(source.join("test.jsonl"), oversized.to_string()).unwrap();
     let invalid = run(&["debug", "--local"], false);
-    assert_eq!(
-        check(&invalid, "localPayload")["details"]["validationErrors"][0]["path"],
-        "hourly[0].tokens"
-    );
+    let issues = &check(&invalid, "localPayload")["details"]["validationErrors"];
+    for path in ["hourly[0].tokens", "contributions[0].clients[0].timeline"] {
+        assert!(issues
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|issue| issue["path"] == path));
+    }
     server.abort();
     let _ = server.await;
     let disconnected = run(&["debug"], false);
@@ -735,4 +744,243 @@ async fn diagnostics_trace_local_remote_and_sync_failures_without_leaking_tokens
     .unwrap();
     let invalid_config = run(&["debug"], false);
     assert_eq!(check(&invalid_config, "configuration")["ok"], false);
+}
+
+#[test]
+fn upstream_settings_collect_multiple_roots_and_report_missing_or_wrong_paths() {
+    let workspace = Workspace::new();
+    let mut sources = json!({"codex":[],"claude":[],"qoder":[]});
+    for (tool, default) in [
+        ("codex", ".codex/sessions"),
+        ("claude", ".claude/projects"),
+        ("qoder", ".qoder/projects"),
+    ] {
+        for i in 0..3 {
+            let root = if i == 0 {
+                workspace.0.join("data").join(default)
+            } else {
+                workspace.0.join(format!("private sources/{tool}/{i}"))
+            };
+            // Include the default root, duplicates and overlapping roots to check deduplication.
+            sources[tool].as_array_mut().unwrap().extend([
+                json!(root),
+                json!(root.join("nested")),
+                json!(root),
+            ]);
+            std::fs::create_dir_all(root.join("nested")).unwrap();
+            let usage = json!({"input_tokens":100,"output_tokens":10});
+            let rows = if tool == "codex" {
+                vec![
+                    json!({"type":"session_meta","payload":{"id":format!("session-{i}")}}),
+                    json!({"type":"turn_context","payload":{"model":"example-model"}}),
+                    json!({"type":"event_msg","timestamp":"2026-01-02T12:00:00Z",
+                        "payload":{"type":"token_count","info":{"total_token_usage":usage,"last_token_usage":usage}}}),
+                ]
+            } else {
+                vec![
+                    json!({"type":"assistant","timestamp":"2026-01-02T12:00:00Z",
+                    "sessionId":format!("session-{i}"),"requestId":format!("request-{i}"),
+                    "message":{"id":format!("message-{i}"),"model":"example-model","usage":usage}}),
+                ]
+            };
+            std::fs::write(
+                root.join(format!("nested/rollout-session-{i}.jsonl")),
+                rows.iter()
+                    .map(Value::to_string)
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )
+            .unwrap();
+        }
+    }
+    for i in 0..2 {
+        let path = workspace.0.join(format!("private sources/qoder-{i}.db"));
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE chat_message(id TEXT, session_id TEXT, request_id TEXT, role TEXT, token_info TEXT, model_info TEXT, gmt_create INTEGER); CREATE TABLE chat_record(request_id TEXT, extra TEXT);").unwrap();
+        conn.execute(
+            "INSERT INTO chat_message VALUES (?1,'session',?1,'assistant',?2,?3,1767355200000)",
+            rusqlite::params![
+                format!("database-request-{i}"),
+                r#"{"prompt_tokens":100,"completion_tokens":10}"#,
+                r#"{"model_key":"example-model"}"#
+            ],
+        )
+        .unwrap();
+        sources["qoder"]
+            .as_array_mut()
+            .unwrap()
+            .extend([json!(path), json!(path)]);
+    }
+    let settings_path = workspace.device_path().with_file_name("settings.json");
+    let mut document =
+        json!({"scanner":{"extraScanPaths":sources}, "defaultClients":["codex","claude","qoder"]});
+    std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        workspace.device_path(),
+        json!({"id":"dev_sources","createdAt":"2026-01-01T00:00:00Z"}).to_string(),
+    )
+    .unwrap();
+    let write = |value: &Value| std::fs::write(&settings_path, value.to_string()).unwrap();
+    write(&document);
+    let run = |clients: &str| {
+        let mut command = workspace.command();
+        if clients == "defaults" {
+            command.env_remove("TOKSCALE_CLIENTS");
+        } else {
+            command.env("TOKSCALE_CLIENTS", clients);
+        }
+        let output = command
+            .current_dir(workspace.0.join("data"))
+            .args(["debug", "--local"])
+            .output()
+            .unwrap();
+        let report: Value = serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&output.stderr)));
+        (output.status.success(), report)
+    };
+    let stage = |report: &Value, name: &str| {
+        report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["stage"] == name)
+            .unwrap()
+            .clone()
+    };
+    // Also run a second process to exercise parser caches and persisted configuration.
+    for _ in 0..2 {
+        let (ok, report) = run("defaults");
+        assert!(ok, "{report}");
+        assert_eq!(
+            stage(&report, "collection")["details"]["messagesByTool"],
+            json!({"codex":3,"claude":3,"qoder":5})
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&std::fs::read(&settings_path).unwrap()).unwrap(),
+            document
+        );
+    }
+    let (ok, report) = run("codex");
+    assert!(ok);
+    assert_eq!(
+        stage(&report, "collection")["details"]["messagesByTool"],
+        json!({"codex":3})
+    );
+
+    document["scanner"]["extraScanPaths"]["codex"] = json!([workspace.0.join("missing sessions")]);
+    write(&document);
+    let (ok, report) = run("codex");
+    assert!(!ok);
+    let access = stage(&report, "sourceAccess");
+    assert_eq!(access["ok"], false);
+    assert!(access["details"]["paths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|path| path["configured"] == true && path["missing"] == true));
+    // A file accidentally entered as a directory must also fail the source check.
+    document["scanner"]["extraScanPaths"]["codex"] = json!([workspace.device_path()]);
+    write(&document);
+    let (ok, report) = run("codex");
+    assert!(!ok);
+    assert_eq!(stage(&report, "sourceAccess")["ok"], false);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn settings_timezone_aligns_daily_hourly_and_qoder_credits() {
+    let received: Arc<Mutex<Vec<Value>>> = Arc::default();
+    let uploads = received.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/api/ingest", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new().route(
+                "/api/ingest",
+                post(move |Json(body): Json<Value>| {
+                    let uploads = uploads.clone();
+                    async move {
+                        uploads.lock().unwrap().push(body);
+                        Json(json!({"ok":true,"timelineVersion":1}))
+                    }
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+    });
+    let workspace = Workspace::new();
+    std::fs::create_dir_all(workspace.device_path().parent().unwrap()).unwrap();
+    std::fs::write(
+        workspace.device_path(),
+        json!({
+            "id":"dev_timezone","createdAt":"2026-01-01T00:00:00Z",
+            "syncUrl":url,"syncToken":"test-token","refreshIntervalSecs":3600
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let settings = json!({"defaultClients":["claude","qoder"],
+        "scanner":{"bucketTimezone":"Pacific/Kiritimati"},"colorPalette":"blue"});
+    let settings_path = workspace.device_path().with_file_name("settings.json");
+    std::fs::write(&settings_path, settings.to_string()).unwrap();
+    for tool in ["claude", "qoder"] {
+        let root = workspace.0.join(format!("data/.{tool}/projects/test"));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("session.jsonl"),
+            json!({
+                "type":"assistant","timestamp":"2026-01-02T12:00:00Z","sessionId":"test-session",
+                "requestId":"request","message":{"id":"message","model":"example-model",
+                    "usage":{"input_tokens":100,"output_tokens":10,"credits":2.5}}
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+    // Restart under another machine timezone: the pinned buckets must remain identical.
+    for local_zone in ["UTC", "America/New_York"] {
+        let output = workspace
+            .command()
+            .env_remove("TOKSCALE_CLIENTS")
+            .env("TZ", local_zone)
+            .args(["sync", "--full"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let uploads = received.lock().unwrap();
+    assert_eq!(uploads.len(), 2);
+    for body in uploads.iter() {
+        assert_eq!(body["contributions"].as_array().unwrap().len(), 1);
+        let daily = &body["contributions"][0];
+        assert_eq!(daily["date"], "2026-01-03");
+        assert_eq!(body["meta"]["timelineVersion"], 1);
+        assert_eq!(body["meta"]["sourceTimeZone"], "Pacific/Kiritimati");
+        let minute = chrono::DateTime::parse_from_rfc3339("2026-01-02T12:00:00Z")
+            .unwrap()
+            .timestamp()
+            / 60;
+        for row in daily["clients"].as_array().unwrap() {
+            assert_eq!(row["timeline"], json!([[minute, 110]]));
+        }
+        assert_eq!(daily["totals"]["tokens"], 220);
+        assert_eq!(daily["totals"]["credits"], 2.5);
+        assert_eq!(body["hourly"].as_array().unwrap().len(), 2);
+        for row in body["hourly"].as_array().unwrap() {
+            assert_eq!(row["date"], "2026-01-03");
+            assert_eq!(row["hour"], 2);
+            assert_eq!(row["tokens"], 110);
+        }
+        assert!(body.get("scanner").is_none());
+    }
+    assert_eq!(
+        serde_json::from_slice::<Value>(&std::fs::read(&settings_path).unwrap()).unwrap(),
+        settings
+    );
+    server.abort();
 }

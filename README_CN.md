@@ -175,6 +175,36 @@ Fork 本仓库。在 Cloudflare 中创建名为 `tokscale-serverless` 的 D1 数
 
 三端都支持使用 `TOKSCALE_CONFIG_DIR` 指定配置目录，使用 `TOKSCALE_HOME` 指定扫描主目录。路径支持中文和空格，建议使用绝对路径；配置变更后重启采集器。`--help` 可查看实际配置位置。
 
+扫描配置沿用上游格式，放在 `device.json` 同目录的 **`settings.json`** 中。采集器读取 `defaultClients` 和 `scanner`，其他原版界面配置不影响采集：
+
+```json
+{
+  "scanner": {
+    "extraScanPaths": {
+      "codex": ["/data/account-a/.codex/sessions", "/data/account-b/.codex/sessions"],
+      "claude": ["/data/claude/projects"],
+      "gemini": ["/data/gemini/tmp"],
+      "qoder": ["/data/qoder/projects", "/data/qoder/local.db"]
+    },
+    "opencodeDbPaths": ["/data/opencode/opencode.db"]
+  }
+}
+```
+
+仅填写本机实际存在的路径，使用绝对路径（Windows 可用 `C:/Users/example/...`）；不会展开 JSON 中的 `~` 或环境变量。`extraScanPaths` 支持上游可追加扫描路径的工具，Qoder 是本项目补充的键，可混合填写 projects 目录和 SQLite 文件；`kilo`、`crush`、`goose` 沿用上游专用的数据发现方式，不支持此通用列表。`opencodeDbPaths` 用于额外的 OpenCode SQLite 数据库。
+
+这些路径追加到默认扫描范围；未配置时行为不变。可用顶层 `"defaultClients": ["codex", "claude", "qoder"]` 限定工具，省略或空数组表示不限；`TOKSCALE_CLIENTS` 优先。`scanner.bucketTimezone` 决定采集端的日记录与 credits 归属，未配置时使用系统本地时区；已同步后应保持该配置不变。控制台的 token 日期和小时始终按浏览器时区展示，不必修改各机器的系统时区。
+
+修改后运行 `tokscale-client debug --local` 检查配置和路径，再执行 `tokscale-client service restart`，无需重新安装服务。采集器只读取 `settings.json`，不改写原版设置；文件缺失时使用默认配置，格式错误会明确报错。
+
+### v0.4 时区修正与升级
+
+先部署 API（`npm --prefix worker run deploy:api` 会应用 `0005_utc_timeline.sql`），再更新控制台和各机器的采集器。采集器上报 UTC 分钟时间戳和来源时区；热力图、分类卡片和小时柱状图统一按浏览器的 IANA 时区汇总，支持跨日、半小时时区和夏令时。夏令时回拨时，两次出现的同名小时合并显示。
+
+UTC 明细紧凑保存在现有日统计行中，不按分钟增加 D1 行；新协议不再写旧的小时表。首次同步会自动补齐本地仍保留的历史，覆盖原有记录，不重复累加。旧记录尚未补齐或缺少时间戳时，日总量仍保留在原日期并明确提示，小时图不猜测其时区。旧版无 `timeZone` 参数的 API 继续保留采集端日期口径。
+
+安装更新后，可运行 `tokscale-client sync` 立即补齐；需要手动重传时用 `sync --full`。API 未更新时，采集器会明确报错并保留同步锚点。无需清空 D1；已经从本机删除的历史日志无法恢复其 UTC 时刻。
+
 ### 增量与全量同步
 
 采集器在 `device.json` 同目录保存 `sync-state.json`。首次全量上传后，只发送变化的日/模型统计、credits 和小时记录；服务器确认成功后才推进锚点。锚点跨重启保留，也能发现旧日期的修正（包括更新 Qoder 系数）。无变化时不上传；空闲扫描最多每小时发送一次设备心跳。采集仍按原配置频率执行。

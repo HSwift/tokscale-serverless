@@ -18,6 +18,7 @@ import {
 import { installerScript, releases } from "./install";
 import { cachedRead, invalidateReads } from "./read-cache";
 import { isValidDate, validateIngest, type IngestIssue } from "./validate";
+import { zonedDashboard, zonedHourly } from "./timeline";
 
 interface TsTokenBreakdown {
 	input?: number;
@@ -28,6 +29,7 @@ interface TsTokenBreakdown {
 }
 
 interface TsSourceContribution {
+    timeline?: [number, number][];
 	client?: string;
 	modelId?: string;
 	providerId?: string;
@@ -59,6 +61,7 @@ interface TsDevice {
 }
 
 interface TsExport {
+    meta?: { timelineVersion?: number; sourceTimeZone?: string };
 	device?: TsDevice;
 	contributions?: TsDailyContribution[];
 	hourly?: { date: string; hour: number; client: string; modelId: string; tokens: number }[];
@@ -133,7 +136,7 @@ async function ingest(request: Request, env: Env, validationOnly = false): Promi
 	const issue = validateIngest(body);
 	if (issue) return rejectIngest(issue);
 	if (validationOnly) {
-		return json({ ok: true, validationOnly: true, days: body.contributions!.length,
+		return json({ ok: true, timelineVersion: 1, validationOnly: true, days: body.contributions!.length,
 			rows: body.contributions!.reduce((n, day) => n + (day.clients ?? []).filter(row => row.client && row.modelId).length, 0),
 			hourly: body.hourly?.length ?? 0 });
 	}
@@ -177,8 +180,8 @@ async function ingest(request: Request, env: Env, validationOnly = false): Promi
 					`INSERT INTO daily_rows
 					   (device_id, date, client, model_id, provider_id,
 					    input, output, cache_read, cache_write, reasoning,
-					    cost, messages, cost_is_complete, updated_at)
-					 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+					    cost, messages, cost_is_complete, timeline, source_time_zone, updated_at)
+					 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
 					 ON CONFLICT(device_id, date, client, model_id) DO UPDATE SET
 					   provider_id = excluded.provider_id,
 					   input = excluded.input,
@@ -189,8 +192,11 @@ async function ingest(request: Request, env: Env, validationOnly = false): Promi
 					   cost = excluded.cost,
 					   messages = excluded.messages,
 					   cost_is_complete = excluded.cost_is_complete,
+					   timeline = excluded.timeline,
+					   source_time_zone = excluded.source_time_zone,
 					   updated_at = datetime('now')
-					 WHERE daily_rows.provider_id IS NOT excluded.provider_id
+					 WHERE (excluded.timeline IS NOT NULL OR daily_rows.timeline IS NULL)
+					   AND (daily_rows.provider_id IS NOT excluded.provider_id
 					    OR daily_rows.input IS NOT excluded.input
 					    OR daily_rows.output IS NOT excluded.output
 					    OR daily_rows.cache_read IS NOT excluded.cache_read
@@ -198,7 +204,9 @@ async function ingest(request: Request, env: Env, validationOnly = false): Promi
 					    OR daily_rows.reasoning IS NOT excluded.reasoning
 					    OR daily_rows.cost IS NOT excluded.cost
 					    OR daily_rows.messages IS NOT excluded.messages
-					    OR daily_rows.cost_is_complete IS NOT excluded.cost_is_complete`,
+					    OR daily_rows.cost_is_complete IS NOT excluded.cost_is_complete
+					    OR daily_rows.timeline IS NOT excluded.timeline
+					    OR daily_rows.source_time_zone IS NOT excluded.source_time_zone)`,
 				).bind(
 					device.id,
 					date,
@@ -213,6 +221,8 @@ async function ingest(request: Request, env: Env, validationOnly = false): Promi
 					num(row.cost),
 					num(row.messages),
 					costIsComplete === undefined ? null : costIsComplete ? 1 : 0,
+					row.timeline === undefined ? null : JSON.stringify(row.timeline),
+					body.meta?.sourceTimeZone ?? null,
 				),
 			);
 		}
@@ -230,7 +240,7 @@ async function ingest(request: Request, env: Env, validationOnly = false): Promi
 		}
 	}
 
-	if (body.hourly !== undefined) {
+	if (body.hourly !== undefined && body.meta?.timelineVersion !== 1) {
 		for (const row of body.hourly) {
 			stmts.push(env.DB.prepare(`INSERT INTO hourly_rows
 				(device_id, date, hour, client, model_id, tokens) VALUES (?, ?, ?, ?, ?, ?)
@@ -259,7 +269,7 @@ async function ingest(request: Request, env: Env, validationOnly = false): Promi
 		return json({ error: { code: "database_error", message } }, 500);
 	}
 	if (rowsWritten > 0) invalidateReads(env);
-	return json({ ok: true, days, rows, rowsRead, rowsWritten });
+	return json({ ok: true, timelineVersion: 1, days, rows, rowsRead, rowsWritten });
 }
 
 interface Filters {
@@ -271,7 +281,7 @@ interface Filters {
 // before reaching this handler. Never include credentials or device statistics.
 async function diagnostics(env: Env): Promise<Response> {
 	const started = Date.now();
-	const base = { apiVersion: "0.3.0", serverTime: new Date().toISOString() };
+	const base = { apiVersion: "0.4.0", serverTime: new Date().toISOString() };
 	try {
 		const result = await env.DB.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('devices', 'daily_rows', 'daily_credits', 'hourly_rows')")
 			.all<{ name: string }>();
@@ -384,6 +394,7 @@ async function daily(url: URL, env: Env): Promise<Response> {
 }
 
 async function hourly(url: URL, env: Env): Promise<Response> {
+	if (url.searchParams.has("timeZone")) return zonedHourly(url, env);
 	const date = url.searchParams.get("date") ?? "";
 	if (!isValidDate(date)) return error(400, "bad_request", "date must be YYYY-MM-DD");
 	const group = url.searchParams.get("group") ?? "devices";
@@ -468,6 +479,7 @@ interface SeriesEntity {
 
 // Read each daily row once, then derive all three console views in memory.
 async function dashboard(url: URL, env: Env): Promise<Response> {
+	if (url.searchParams.has("timeZone")) return zonedDashboard(url, env);
 	const f = filters(url);
 	if (f instanceof Response) return f;
 	const result = await env.DB.prepare(`SELECT r.device_id, r.client, r.model_id, r.date,

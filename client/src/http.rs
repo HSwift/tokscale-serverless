@@ -102,6 +102,7 @@ pub async fn send(request: reqwest::RequestBuilder, token: Option<&str>) -> Resu
             let mut selected = serde_json::Map::new();
             for key in [
                 "ok",
+                "timelineVersion",
                 "validationOnly",
                 "days",
                 "rows",

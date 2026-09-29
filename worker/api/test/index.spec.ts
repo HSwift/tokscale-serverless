@@ -2,6 +2,7 @@ import { env, SELF } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import schema from "../migrations/0001_init.sql?raw";
 import hourlySchema from "../migrations/0002_hourly_and_install.sql?raw";
+import timelineSchema from "../migrations/0005_utc_timeline.sql?raw";
 import worker from "../src/index";
 
 const AUTH = { Authorization: "Bearer test-token" };
@@ -52,7 +53,7 @@ const EXPORT_PAYLOAD = {
 beforeAll(async () => {
 	// workerd's D1 exec is line-oriented: feed one statement per exec call,
 	// collapsed to a single line, comments stripped.
-	const body = (schema + "\n" + hourlySchema)
+	const body = (schema + "\n" + hourlySchema + "\n" + timelineSchema)
 		.split("\n")
 		.filter((line) => !line.trimStart().startsWith("--"))
 		.join("\n");
@@ -309,7 +310,7 @@ describe("diagnostics", () => {
 	it("authenticates health checks and diagnoses schema and D1 failures", async () => {
 		expect((await SELF.fetch("https://example.com/api/diagnostics")).status).toBe(401);
 		const response = await SELF.fetch("https://example.com/api/diagnostics", { headers: AUTH });
-		expect(await response.json()).toMatchObject({ ok: true, apiVersion: "0.3.0", database: { ok: true, missingTables: [], rowsWritten: 0 } });
+		expect(await response.json()).toMatchObject({ ok: true, apiVersion: "0.4.0", database: { ok: true, missingTables: [], rowsWritten: 0 } });
 		const request = () => new Request("https://example.com/api/diagnostics", { headers: AUTH });
 		const broken = { prepare() { throw new Error("D1 quota exceeded test-token"); } } as unknown as D1Database;
 		const failure = await worker.fetch(request(), { ...env, DB: broken });
@@ -424,4 +425,86 @@ describe("hourly usage", () => {
 		expect((await SELF.fetch("https://example.com/api/hourly?date=2026-02-30", { headers: AUTH })).status).toBe(400);
 		expect((await SELF.fetch("https://example.com/api/hourly?date=2026-09-28")).status).toBe(401);
 	});
+});
+
+const minute = (time: string) => Date.parse(time) / 60_000;
+
+describe("UTC timelines", () => {
+    const payload = (id: string, date: string, entries: [number, number][], zone = "Asia/Tokyo") => ({
+        meta: { timelineVersion: 1, sourceTimeZone: zone },
+        device: { id }, contributions: [{ date, clients: [{ client: "codex", modelId: "test-model",
+            tokens: { input: entries.reduce((sum, point) => sum + point[1], 0) }, timeline: entries }] }],
+    });
+    const get = async (path: string) => {
+        const response = await SELF.fetch(`https://example.com/api/${path}`, { headers: AUTH });
+        expect(response.status).toBe(200);
+        return response.json() as Promise<any>;
+    };
+
+    it("replaces legacy hours without duplication and converts Tokyo noon to Shanghai 11am", async () => {
+        const id = "dev_utc_upgrade";
+        const legacy = { device: { id }, contributions: [{ date: "2026-09-29", clients: [{
+            client: "codex", modelId: "test-model", tokens: { input: 100 },
+        }] }], hourly: [{ date: "2026-09-29", hour: 12, client: "codex", modelId: "test-model", tokens: 100 }] };
+        expect((await postIngest(legacy)).status).toBe(200);
+        const query = `date=2026-09-29&deviceId=${id}&timeZone=Asia%2FShanghai`;
+        const old = await get(`hourly?${query}`);
+        expect(old.totalTokens).toBe(100);
+        expect(old.legacyTokens).toBe(100);
+        expect(old.hourlyTokens).toBe(0);
+        const upgraded = payload(id, "2026-09-29", [[minute("2026-09-29T03:15:00Z"), 100]]);
+        const first = await postIngest({ ...upgraded, hourly: legacy.hourly });
+        expect(await first.json()).toMatchObject({ ok: true, timelineVersion: 1 });
+        const current = await get(`hourly?${query}`);
+        expect(current).toMatchObject({ timezone: "Asia/Shanghai", totalTokens: 100, hourlyTokens: 100, legacyTokens: 0, complete: true });
+        expect(current.hours[11].tokens).toBe(100);
+        expect(current.hours[12].tokens).toBe(0);
+        const dashboard = await get(`dashboard?since=2026-09-29&until=2026-09-29&deviceId=${id}&timeZone=Asia%2FShanghai`);
+        expect(dashboard.devices.entities[0].tokens).toBe(100);
+        expect(dashboard.breakdown).toHaveLength(1);
+        expect((await (await postIngest(upgraded)).json()).rowsWritten).toBe(0);
+        // A delayed older collector cannot erase the absolute timestamps.
+        await postIngest(legacy);
+        expect((await get(`hourly?${query}`)).legacyTokens).toBe(0);
+    });
+
+    it("rebuckets all dashboard dimensions across midnight and keeps timezone caches separate", async () => {
+        const id = "dev_utc_midnight";
+        const modern = payload(id, "2026-09-29", [[minute("2026-09-28T15:30:00Z"), 20], [minute("2026-09-28T16:30:00Z"), 30]]);
+        expect((await postIngest(modern)).status).toBe(200);
+        const query = `since=2026-09-28&until=2026-09-29&deviceId=${id}`;
+        const shanghai = await get(`dashboard?${query}&timeZone=Asia%2FShanghai`);
+        for (const group of ["devices", "clients", "models"]) {
+            expect(shanghai[group].entities[0].days).toEqual([{ date: "2026-09-28", tokens: 20 }, { date: "2026-09-29", tokens: 30 }]);
+        }
+        const tokyo = await get(`dashboard?${query}&timeZone=Asia%2FTokyo`);
+        expect(tokyo.devices.entities[0].days).toEqual([{ date: "2026-09-29", tokens: 50 }]);
+        const hourly = await get(`hourly?date=2026-09-29&deviceId=${id}&client=codex&modelId=test-model&group=models&timeZone=Asia%2FShanghai`);
+        expect(hourly.hours[0].tokens).toBe(30);
+        expect(hourly.totalTokens).toBe(30);
+        expect(hourly.entities[0].key).toBe("test-model");
+    });
+
+    it("handles fractional offsets and both occurrences of a DST hour", async () => {
+        const id = "dev_utc_fractional";
+        await postIngest(payload(id, "2026-09-29", [[minute("2026-09-29T03:15:00Z"), 10], [minute("2026-09-29T03:45:00Z"), 20]]));
+        const india = await get(`hourly?date=2026-09-29&deviceId=${id}&timeZone=Asia%2FKolkata`);
+        expect(india.hours[8].tokens).toBe(10);
+        expect(india.hours[9].tokens).toBe(20);
+        await postIngest(payload(id, "2026-11-01", [[minute("2026-11-01T05:30:00Z"), 30], [minute("2026-11-01T06:30:00Z"), 40]], "America/New_York"));
+        const ny = await get(`hourly?date=2026-11-01&deviceId=${id}&timeZone=America%2FNew_York`);
+        expect(ny.hours[1].tokens).toBe(70);
+        expect(ny.hourlyTokens).toBe(ny.totalTokens);
+    });
+
+    it("rejects invalid timezone or UTC timelines before any D1 work", async () => {
+        for (const zone of ["", "Not/A_Zone"]) {
+            const response = await SELF.fetch(`https://example.com/api/hourly?date=2026-09-29&timeZone=${zone}`, { headers: AUTH });
+            expect(response.status).toBe(400);
+        }
+        const t = minute("2026-09-29T03:15:00Z");
+        for (const entries of [[[t, -1]], [[t, 1], [t, 1]], [[t, 1.5]], [[t - 10000, 1]]] as [number, number][][]) {
+            expect((await postIngest(payload("dev_invalid_timeline", "2026-09-29", entries))).status).toBe(400);
+        }
+    });
 });
