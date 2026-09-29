@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { formatTokens, toolLabel, SERIES_COLORS, type NumberFormat } from "./format";
 import { hourlyChartData, hourLabel, hourRange } from "./hourly";
 export { formatTokens, toolLabel, SERIES_COLORS } from "./format";
@@ -60,7 +60,7 @@ function DailyCard(props: Props) {
 		label: props.group === "clients" && entity.key !== "total" ? toolLabel(entity.key) : entity.label,
 	}));
 	const chartData = hourlyChartData(series);
-	const maxTokens = series.reduce((max, entity) => Math.max(max, ...entity.hours.map(row => row.tokens)), 0);
+	const maxTokens = Math.max(0, ...chartData.map(point => series.reduce((sum, entity) => sum + point[entity.dataKey], 0)));
 	const axisWidth = Math.max(48, Math.min(140, fmt(maxTokens * 1.2).length * 7 + 14));
 	const missing = data && !data.hasHourlyData && data.totalTokens > 0;
 	const note = current?.error ?? (missing
@@ -78,15 +78,11 @@ function DailyCard(props: Props) {
 		<div className="hourly-chart" id="hourly-chart" aria-label={`${props.date} · ${props.scope} · 每小时 token 用量`}>
 			{!data || missing ? <p className="chart-placeholder">{loading ? "加载中…" : current?.error ? "暂时无法加载小时明细" : "这一天还没有小时明细"}</p> :
 				<ResponsiveContainer width="100%" height="100%" minWidth={0} initialDimension={{ width: 800, height: 230 }}>
-					<AreaChart data={chartData} margin={{ top: 12, right: 14, bottom: 0, left: 0 }} accessibilityLayer>
-						<defs><linearGradient id="hourly-gradient" x1="0" y1="0" x2="0" y2="1">
-							<stop offset="0%" stopColor="var(--accent)" stopOpacity={.28} />
-							<stop offset="100%" stopColor="var(--accent)" stopOpacity={.015} />
-						</linearGradient></defs>
+					<BarChart data={chartData} barCategoryGap="18%" margin={{ top: 12, right: 14, bottom: 0, left: 0 }} accessibilityLayer>
 						<CartesianGrid vertical={false} stroke="var(--border)" strokeDasharray="3 5" />
 						<XAxis dataKey="time" type="number" domain={[0, 24]} ticks={[0, 4, 8, 12, 16, 20, 24]} tickFormatter={hourLabel} minTickGap={20} axisLine={false} tickLine={false} tick={{ fill: "var(--muted)", fontSize: 11 }} />
 						<YAxis width={axisWidth} tickFormatter={fmt} allowDecimals={false} axisLine={false} tickLine={false} tick={{ fill: "var(--muted)", fontSize: 11 }} />
-						<Tooltip cursor={{ stroke: "var(--muted)", strokeDasharray: "3 3" }} content={({ active, payload }) => active && payload?.length ?
+						<Tooltip cursor={{ fill: "var(--border)", fillOpacity: 0.5 }} content={({ active, payload }) => active && payload?.length ?
 							<div className="hourly-tooltip">
 								<p>{hourRange(Number(payload[0].payload.hour))}</p>
 								<ul>{payload.map(item => <li key={String(item.dataKey)}>
@@ -94,11 +90,9 @@ function DailyCard(props: Props) {
 									<span className="value">{fmt(Number(item.value))} tokens</span>
 								</li>)}</ul>
 							</div> : null} />
-						{series.map((entity, index) => <Area key={entity.key} type="linear" dataKey={entity.dataKey} name={entity.label}
-							stroke={entity.color} strokeWidth={2} strokeDasharray={index >= SERIES_COLORS.length ? "5 3" : undefined}
-							fill={series.length === 1 ? "url(#hourly-gradient)" : "none"}
-							isAnimationActive={false} activeDot={{ r: 4, stroke: "var(--surface)", strokeWidth: 2 }} />)}
-					</AreaChart>
+						{series.map(entity => <Bar key={entity.key} dataKey={entity.dataKey} name={entity.label}
+							stackId="tokens" fill={entity.color} isAnimationActive={false} />)}
+					</BarChart>
 				</ResponsiveContainer>}
 		</div>
 		{!missing && series.length > 0 && <ul className="hourly-legend" aria-label="小时用量明细">
